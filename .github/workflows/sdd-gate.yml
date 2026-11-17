@@ -31,6 +31,11 @@ jobs:
           for f in tests/traces/*.ztrace; do
             cargo run -p aitools-cli -- harness replay "$f" --assert-no-anomalies
           done
+      - name: Audit built-in & example plugins
+        run: |
+          for p in plugins/builtin/* examples/plugins/*; do
+            cargo run -p aitools-cli -- plugin audit "$p"
+          done
 
   frontend-and-sdk:
     runs-on: macos-latest

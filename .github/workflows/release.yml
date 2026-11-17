@@ -1,0 +1,137 @@
+name: Cross-Platform Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  pre-flight-sdd-gate:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Run Rust formatting, Clippy, Rustdoc, and tests
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo doc --workspace --no-deps
+          cargo test --workspace
+      - name: Replay golden .ztrace fixtures
+        run: |
+          for f in tests/traces/*.ztrace; do
+            cargo run -p aitools-cli -- harness replay "$f" --assert-no-anomalies
+          done
+      - name: Verify Svelte UI & SDK types
+        run: |
+          pnpm --filter @aitools/renderer-svelte check
+          pnpm --filter @aitools/renderer-svelte build
+          ./packages/renderer-svelte/node_modules/.bin/tsc -p packages/aitools-sdk/tsconfig.json --noEmit
+
+  release:
+    needs: pre-flight-sdd-gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            rust_target: aarch64-apple-darwin
+            args: '--target aarch64-apple-darwin'
+          - platform: macos-latest
+            rust_target: x86_64-apple-darwin
+            args: '--target x86_64-apple-darwin'
+          - platform: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            args: '--target x86_64-pc-windows-msvc'
+          - platform: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+            args: '--target x86_64-unknown-linux-gnu'
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux webkit & AppImage dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }},wasm32-unknown-unknown
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install JS workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Tauri release bundles & updater artifacts (latest.json)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'aitools ${{ github.ref_name }}'
+          releaseBody: 'Automated multi-platform release verified by SDD Quality Gate (`SPEC-000` <= 18 MB installer budget).'
+          releaseDraft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          includeUpdaterJson: true
+          args: ${{ matrix.args }}
+
+      - name: Enforce SPEC-000 installer size budget (<= 18 MB)
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import pathlib, sys
+
+          bundle_root = pathlib.Path("target") / "${{ matrix.rust_target }}" / "release" / "bundle"
+          max_bytes = 18 * 1024 * 1024  # 18 MiB (SPEC-000 Hard CI Ceiling)
+          suffixes = (".dmg", ".msi", "-setup.exe", ".deb", ".AppImage")
+
+          artifacts = [
+              p for p in bundle_root.rglob("*")
+              if p.is_file() and p.name.endswith(suffixes)
+          ]
+          if not artifacts:
+              print(f"ERROR: No installer artifacts found under {bundle_root}", file=sys.stderr)
+              sys.exit(1)
+
+          failed = False
+          for p in sorted(artifacts):
+              size = p.stat().st_size
+              mib = size / (1024 * 1024)
+              status = "OK" if size <= max_bytes else "EXCEEDED"
+              print(f"[{status}] {p}: {mib:.2f} MiB ({size} bytes)")
+              if size > max_bytes:
+                  failed = True
+
+          if failed:
+              sys.exit(1)
+          PY
