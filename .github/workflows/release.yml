@@ -40,6 +40,11 @@ jobs:
           for f in tests/traces/*.ztrace; do
             cargo run -p aitools-cli -- harness replay "$f" --assert-no-anomalies
           done
+      - name: Audit built-in & example plugins
+        run: |
+          for p in plugins/builtin/* examples/plugins/*; do
+            cargo run -p aitools-cli -- plugin audit "$p"
+          done
       - name: Verify Svelte UI & SDK types
         run: |
           pnpm --filter @aitools/renderer-svelte check
@@ -90,13 +95,78 @@ jobs:
       - name: Install JS workspace dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build Tauri release bundles & updater artifacts (latest.json)
+      - name: Validate & prepare updater signing key
+        id: signing
+        shell: bash
+        env:
+          RAW_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          RAW_PW: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+
+          function stripWrappingQuotes(s) {
+            let out = String(s || '').trim();
+            if ((out.startsWith('"') && out.endsWith('"')) || (out.startsWith("'") && out.endsWith("'"))) {
+              out = out.slice(1, -1).trim();
+            }
+            return out;
+          }
+
+          const rawKey = stripWrappingQuotes(process.env.RAW_KEY);
+          const rawPw = stripWrappingQuotes(process.env.RAW_PW);
+
+          let cleanKey = '';
+          let valid = false;
+          if (rawKey.startsWith('untrusted comment:')) {
+            cleanKey = rawKey.replace(/\r\n/g, '\n');
+            valid = cleanKey.includes('\n');
+          } else if (rawKey.length > 0) {
+            const compact = rawKey.replace(/\s+/g, '');
+            try {
+              const decoded = Buffer.from(compact, 'base64').toString('utf8');
+              if (decoded.startsWith('untrusted comment:')) {
+                cleanKey = compact;
+                valid = true;
+              }
+            } catch {
+              valid = false;
+            }
+          }
+
+          const outFile = process.env.GITHUB_OUTPUT;
+          const envFile = process.env.GITHUB_ENV;
+          if (!valid) {
+            console.log(
+              '::warning::TAURI_SIGNING_PRIVATE_KEY is missing, empty, or invalid; building unsigned installers without updater artifacts (latest.json).'
+            );
+            fs.appendFileSync(outFile, 'has_key=false\n');
+            process.exit(0);
+          }
+
+          console.log(`::add-mask::${cleanKey}`);
+          if (rawPw) {
+            console.log(`::add-mask::${rawPw}`);
+          }
+          fs.appendFileSync(
+            envFile,
+            `TAURI_SIGNING_PRIVATE_KEY<<__AITOOLS_KEY__\n${cleanKey}\n__AITOOLS_KEY__\n`
+          );
+          fs.appendFileSync(
+            envFile,
+            `TAURI_SIGNING_PRIVATE_KEY_PASSWORD<<__AITOOLS_PW__\n${rawPw}\n__AITOOLS_PW__\n`
+          );
+          fs.appendFileSync(outFile, 'has_key=true\n');
+          NODE
+
+      - name: Build Tauri release bundles & signed updater artifacts (latest.json)
+        if: steps.signing.outputs.has_key == 'true'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          NO_STRIP: true
         with:
+          tauriScript: pnpm tauri
           tagName: ${{ github.ref_name }}
           releaseName: 'aitools ${{ github.ref_name }}'
           releaseBody: 'Automated multi-platform release verified by SDD Quality Gate (`SPEC-000` <= 18 MB installer budget).'
@@ -105,33 +175,61 @@ jobs:
           includeUpdaterJson: true
           args: ${{ matrix.args }}
 
+      - name: Build unsigned Tauri release bundles (fallback without TAURI_SIGNING_PRIVATE_KEY)
+        if: steps.signing.outputs.has_key != 'true'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NO_STRIP: true
+        with:
+          tauriScript: pnpm tauri
+          tagName: ${{ github.ref_name }}
+          releaseName: 'aitools ${{ github.ref_name }}'
+          releaseBody: 'Automated multi-platform release (unsigned fallback: configure TAURI_SIGNING_PRIVATE_KEY to enable latest.json auto-updater signing).'
+          releaseDraft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          includeUpdaterJson: false
+          args: ${{ matrix.args }} --config src-tauri/tauri.unsigned.conf.json
+
       - name: Enforce SPEC-000 installer size budget (<= 18 MB)
         shell: bash
         run: |
-          python3 - <<'PY'
-          import pathlib, sys
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
 
-          bundle_root = pathlib.Path("target") / "${{ matrix.rust_target }}" / "release" / "bundle"
-          max_bytes = 18 * 1024 * 1024  # 18 MiB (SPEC-000 Hard CI Ceiling)
-          suffixes = (".dmg", ".msi", "-setup.exe", ".deb", ".AppImage")
+          const bundleRoot = path.join('target', '${{ matrix.rust_target }}', 'release', 'bundle');
+          const maxBytes = 18 * 1024 * 1024; // 18 MiB (SPEC-000 Hard CI Ceiling)
+          const suffixes = ['.dmg', '.msi', '-setup.exe', '.deb', '.AppImage'];
 
-          artifacts = [
-              p for p in bundle_root.rglob("*")
-              if p.is_file() and p.name.endswith(suffixes)
-          ]
-          if not artifacts:
-              print(f"ERROR: No installer artifacts found under {bundle_root}", file=sys.stderr)
-              sys.exit(1)
+          function walk(dir, acc) {
+            if (!fs.existsSync(dir)) return;
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const full = path.join(dir, entry.name);
+              if (entry.isDirectory()) {
+                walk(full, acc);
+              } else if (entry.isFile() && suffixes.some((s) => entry.name.endsWith(s))) {
+                acc.push(full);
+              }
+            }
+          }
 
-          failed = False
-          for p in sorted(artifacts):
-              size = p.stat().st_size
-              mib = size / (1024 * 1024)
-              status = "OK" if size <= max_bytes else "EXCEEDED"
-              print(f"[{status}] {p}: {mib:.2f} MiB ({size} bytes)")
-              if size > max_bytes:
-                  failed = True
+          const artifacts = [];
+          walk(bundleRoot, artifacts);
+          artifacts.sort();
 
-          if failed:
-              sys.exit(1)
-          PY
+          if (artifacts.length === 0) {
+            console.error(`ERROR: No installer artifacts found under ${bundleRoot}`);
+            process.exit(1);
+          }
+
+          let failed = false;
+          for (const file of artifacts) {
+            const size = fs.statSync(file).size;
+            const mib = size / (1024 * 1024);
+            const ok = size <= maxBytes;
+            console.log(`[${ok ? 'OK' : 'EXCEEDED'}] ${file}: ${mib.toFixed(2)} MiB (${size} bytes)`);
+            if (!ok) failed = true;
+          }
+          if (failed) process.exit(1);
+          NODE
