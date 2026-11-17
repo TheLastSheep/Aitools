@@ -1,0 +1,29 @@
+[package]
+name = "aitools-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core models, LMDB storage/sync engine, CJK Pinyin & hybrid search matcher for aitools"
+
+[dependencies]
+aitools-telemetry = { path = "../aitools-telemetry" }
+chrono = { workspace = true }
+heed = { workspace = true }
+nucleo-matcher = { workspace = true }
+once_cell = "1"
+parking_lot = "0.12"
+pinyin = { workspace = true }
+regex = { workspace = true }
+regex-automata = { version = "0.4", default-features = false, features = ["meta"] }
+regex-syntax = "0.8"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bench]]
+name = "wake_latency"
+harness = false

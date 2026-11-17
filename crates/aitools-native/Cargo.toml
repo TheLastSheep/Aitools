@@ -1,0 +1,17 @@
+[package]
+name = "aitools-native"
+version = "0.1.0"
+edition = "2021"
+description = "Native OS hooks, double-tap hotkey detector, bounded app catalog, pre-focus context, and keychain secrets for aitools"
+
+[dependencies]
+aitools-telemetry = { path = "../aitools-telemetry" }
+arboard = { workspace = true }
+dirs = "5"
+keyring = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
