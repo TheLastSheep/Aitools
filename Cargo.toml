@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aitools-telemetry",
+    "crates/aitools-core",
+    "crates/aitools-native",
+    "crates/aitools-ai",
+    "crates/aitools-js-bridge",
+    "crates/aitools-wasm-host",
+    "crates/tauri-plugin-aitools",
+    "crates/aitools-cli",
+    "src-tauri",
+]
+
+[workspace.dependencies]
+tauri = { version = "2", features = ["protocol-asset", "macos-private-api"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "fs", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["registry", "env-filter", "fmt"] }
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+heed = "0.21"
+nucleo-matcher = "0.3"
+pinyin = "0.10"
+arboard = "3"
+xcap = "0.3"
+enigo = "0.3"
+keyring = "3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+wasmtime = { version = "27", features = ["component-model", "async"] }
+rquickjs = { version = "0.8", features = ["classes", "properties", "loader", "futures", "array-buffer"] }
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

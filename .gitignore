@@ -1,0 +1,13 @@
+target/
+.DS_Store
+*.log
+*.jsonl
+*.ztrace
+!tests/traces/*.ztrace
+*.zip
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+gen/

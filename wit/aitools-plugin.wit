@@ -1,0 +1,51 @@
+package aitools:plugin@0.2.0;
+
+/// Host-provided capabilities subject to `aitools.manifest.json` permissions.
+interface host-services {
+    record log-entry {
+        level: string,
+        msg: string,
+        fields-json: string,
+    }
+    log: func(entry: log-entry);
+    db-get: func(id: string) -> result<option<string>, string>;
+    db-put: func(doc-json: string) -> result<string, string>;
+}
+
+/// Shared types across launcher queries and Agent tool execution.
+interface types {
+    enum risk-tier {
+        tier0-read-only,
+        tier1-state-mutating,
+        tier2-destructive-or-external,
+    }
+
+    record tool-definition {
+        name: string,
+        description: string,
+        parameters-json-schema: string,
+        risk: risk-tier,
+    }
+
+    record list-item {
+        id: string,
+        title: string,
+        subtitle: string,
+        score: f32,
+        action-payload-json: string,
+    }
+}
+
+world aitools-extension {
+    import host-services;
+    use types.{tool-definition, list-item};
+
+    /// Called by SPEC-005 launcher bar for instant headless list filtering.
+    export on-query: func(query: string, context-json: string) -> result<list<list-item>, string>;
+
+    /// Called by SPEC-007 ToolRegistry at load time.
+    export register-tools: func() -> list<tool-definition>;
+
+    /// Called by SPEC-011 DAG Executor when an AI Agent invokes a tool.
+    export execute-tool: func(tool-name: string, args-json: string, context-json: string) -> result<string, string>;
+}
