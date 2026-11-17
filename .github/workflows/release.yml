@@ -117,29 +117,45 @@ jobs:
           const rawPw = stripWrappingQuotes(process.env.RAW_PW);
 
           let cleanKey = '';
-          let valid = false;
+          let keyKind = 'empty';
           if (rawKey.startsWith('untrusted comment:')) {
-            cleanKey = rawKey.replace(/\r\n/g, '\n');
-            valid = cleanKey.includes('\n');
+            // Plaintext minisign key -> re-encode cleanly to base64 as expected by Tauri CLI.
+            cleanKey = Buffer.from(rawKey.replace(/\r\n/g, '\n') + (rawKey.endsWith('\n') ? '' : '\n'), 'utf8').toString('base64');
+            keyKind = 'plaintext_minisign';
           } else if (rawKey.length > 0) {
             const compact = rawKey.replace(/\s+/g, '');
             try {
               const decoded = Buffer.from(compact, 'base64').toString('utf8');
-              if (decoded.startsWith('untrusted comment:')) {
+              if (decoded.includes('untrusted comment:')) {
                 cleanKey = compact;
-                valid = true;
+                keyKind = 'base64_minisign';
+              } else {
+                keyKind = 'invalid_decoded_header';
               }
             } catch {
-              valid = false;
+              keyKind = 'invalid_base64';
             }
           }
 
+          console.log(`Signing key check: raw_len=${rawKey.length}, kind=${keyKind}`);
+
           const outFile = process.env.GITHUB_OUTPUT;
           const envFile = process.env.GITHUB_ENV;
-          if (!valid) {
+          if (!cleanKey) {
             console.log(
-              '::warning::TAURI_SIGNING_PRIVATE_KEY is missing, empty, or invalid; building unsigned installers without updater artifacts (latest.json).'
+              '::warning::TAURI_SIGNING_PRIVATE_KEY is missing, empty, or invalid; disabling updater artifacts in src-tauri/tauri.conf.json for unsigned release build.'
             );
+            const confPath = 'src-tauri/tauri.conf.json';
+            const conf = JSON.parse(fs.readFileSync(confPath, 'utf8'));
+            if (!conf.bundle) conf.bundle = {};
+            conf.bundle.createUpdaterArtifacts = false;
+            if (conf.plugins && conf.plugins.updater) {
+              delete conf.plugins.updater;
+              if (Object.keys(conf.plugins).length === 0) {
+                delete conf.plugins;
+              }
+            }
+            fs.writeFileSync(confPath, JSON.stringify(conf, null, 2) + '\n');
             fs.appendFileSync(outFile, 'has_key=false\n');
             process.exit(0);
           }
@@ -175,7 +191,7 @@ jobs:
           includeUpdaterJson: true
           args: ${{ matrix.args }}
 
-      - name: Build unsigned Tauri release bundles (fallback without TAURI_SIGNING_PRIVATE_KEY)
+      - name: Build unsigned Tauri release bundles (no signing key configured)
         if: steps.signing.outputs.has_key != 'true'
         uses: tauri-apps/tauri-action@v0
         env:
@@ -189,7 +205,7 @@ jobs:
           releaseDraft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           includeUpdaterJson: false
-          args: ${{ matrix.args }} --config src-tauri/tauri.unsigned.conf.json
+          args: ${{ matrix.args }}
 
       - name: Enforce SPEC-000 installer size budget (<= 18 MB)
         shell: bash
