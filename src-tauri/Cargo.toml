@@ -1,0 +1,28 @@
+[package]
+name = "aitools-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "Tauri v2 desktop host shell for aitools"
+
+[lib]
+name = "aitools_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+aitools-ai = { path = "../crates/aitools-ai" }
+aitools-core = { path = "../crates/aitools-core" }
+aitools-native = { path = "../crates/aitools-native" }
+aitools-telemetry = { path = "../crates/aitools-telemetry" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tauri = { workspace = true }
+tauri-plugin-aitools = { path = "../crates/tauri-plugin-aitools" }
+tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
+tracing = { workspace = true }

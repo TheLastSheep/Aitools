@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-dsh-set-fault-injection"
+description = "Enables the dsh_set_fault_injection command without any pre-configured scope."
+commands.allow = ["dsh_set_fault_injection"]
+
+[[permission]]
+identifier = "deny-dsh-set-fault-injection"
+description = "Denies the dsh_set_fault_injection command without any pre-configured scope."
+commands.deny = ["dsh_set_fault_injection"]

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-db-put"
+description = "Enables the db_put command without any pre-configured scope."
+commands.allow = ["db_put"]
+
+[[permission]]
+identifier = "deny-db-put"
+description = "Denies the db_put command without any pre-configured scope."
+commands.deny = ["db_put"]

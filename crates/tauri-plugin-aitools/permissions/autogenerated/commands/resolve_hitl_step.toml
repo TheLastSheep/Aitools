@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-resolve-hitl-step"
+description = "Enables the resolve_hitl_step command without any pre-configured scope."
+commands.allow = ["resolve_hitl_step"]
+
+[[permission]]
+identifier = "deny-resolve-hitl-step"
+description = "Denies the resolve_hitl_step command without any pre-configured scope."
+commands.deny = ["resolve_hitl_step"]

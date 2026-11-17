@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-dsh-recent-logs"
+description = "Enables the dsh_recent_logs command without any pre-configured scope."
+commands.allow = ["dsh_recent_logs"]
+
+[[permission]]
+identifier = "deny-dsh-recent-logs"
+description = "Denies the dsh_recent_logs command without any pre-configured scope."
+commands.deny = ["dsh_recent_logs"]

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-dsh-ingest-frontend-log"
+description = "Enables the dsh_ingest_frontend_log command without any pre-configured scope."
+commands.allow = ["dsh_ingest_frontend_log"]
+
+[[permission]]
+identifier = "deny-dsh-ingest-frontend-log"
+description = "Denies the dsh_ingest_frontend_log command without any pre-configured scope."
+commands.deny = ["dsh_ingest_frontend_log"]

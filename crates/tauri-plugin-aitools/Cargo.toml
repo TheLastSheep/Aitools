@@ -1,0 +1,26 @@
+[package]
+name = "tauri-plugin-aitools"
+version = "0.1.0"
+edition = "2021"
+links = "tauri-plugin-aitools"
+description = "Tauri v2 host plugin bridging aitools-core, aitools-native, aitools-ai, aitools-js-bridge, and aitools-wasm-host with INV-SEC-01/02 enforcement"
+
+[dependencies]
+aitools-ai = { path = "../aitools-ai" }
+aitools-core = { path = "../aitools-core" }
+aitools-js-bridge = { path = "../aitools-js-bridge" }
+aitools-native = { path = "../aitools-native" }
+aitools-telemetry = { path = "../aitools-telemetry" }
+aitools-wasm-host = { path = "../aitools-wasm-host" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tauri = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

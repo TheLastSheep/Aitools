@@ -1,0 +1,19 @@
+[default]
+description = "Default permissions for the aitools Tauri plugin"
+permissions = [
+  "allow-search-features",
+  "allow-zero-query-suggestions",
+  "allow-run-agent-dag",
+  "allow-resolve-hitl-step",
+  "allow-invoke-legacy-list-feature",
+  "allow-dsh-recent-logs",
+  "allow-dsh-ingest-frontend-log",
+  "allow-dsh-set-fault-injection",
+  "allow-db-get",
+  "allow-db-put",
+  "allow-db-remove",
+  "allow-db-all-docs",
+  "allow-ai-chat",
+  "allow-ai-embed",
+  "allow-telemetry-log"
+]

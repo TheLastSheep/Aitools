@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-zero-query-suggestions"
+description = "Enables the zero_query_suggestions command without any pre-configured scope."
+commands.allow = ["zero_query_suggestions"]
+
+[[permission]]
+identifier = "deny-zero-query-suggestions"
+description = "Denies the zero_query_suggestions command without any pre-configured scope."
+commands.deny = ["zero_query_suggestions"]
