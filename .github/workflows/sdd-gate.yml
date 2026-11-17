@@ -1,0 +1,53 @@
+name: SDD Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust-quality-and-tests:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Clippy (-D warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Rustdoc (-D warnings)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+      - name: Run workspace tests
+        run: cargo test --workspace
+      - name: Run wake latency benchmark
+        run: cargo bench -p aitools-core --bench wake_latency
+      - name: Replay golden .ztrace fixtures
+        run: |
+          for f in tests/traces/*.ztrace; do
+            cargo run -p aitools-cli -- harness replay "$f" --assert-no-anomalies
+          done
+
+  frontend-and-sdk:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Svelte typecheck
+        run: pnpm --filter @aitools/renderer-svelte check
+      - name: Svelte production build
+        run: pnpm --filter @aitools/renderer-svelte build
+      - name: Typecheck @aitools/sdk
+        run: ./packages/renderer-svelte/node_modules/.bin/tsc -p packages/aitools-sdk/tsconfig.json --noEmit
