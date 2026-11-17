@@ -1,4 +1,10 @@
 {
   "name": "aitools-workspace",
-  "private": true
+  "private": true,
+  "scripts": {
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4"
+  }
 }
