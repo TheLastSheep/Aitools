@@ -1,0 +1,23 @@
+{
+  "id": "devtools",
+  "name": "DevTools Wasm Formatter",
+  "version": "0.1.0",
+  "runtime": "rust-wasm",
+  "wasm_entry": "plugin.wasm",
+  "permissions": ["clipboard.read", "clipboard.write"],
+  "ai_tools": [
+    {
+      "name": "json_validate",
+      "description": "Validate JSON syntax and estimate normalized token length.",
+      "risk_tier": "tier0_read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "input": { "type": "string" }
+        },
+        "required": ["input"]
+      }
+    }
+  ],
+  "skill_file": "SKILL.md"
+}

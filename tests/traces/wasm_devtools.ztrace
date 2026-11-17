@@ -1,0 +1,2 @@
+{"seq":30,"ts":"2026-11-16T10:03:00.000200Z","level":"DEBUG","trace_id":"wasm-004","source":"aitools_wasm_host","plugin_id":"devtools","span":"wasm_instantiate","duration_us":1850,"msg":"Instantiated devtools plugin.wasm with 64MB memory and fuel cap"}
+{"seq":31,"ts":"2026-11-16T10:03:00.002900Z","level":"INFO","trace_id":"wasm-004","source":"aitools_wasm_host","plugin_id":"devtools","msg":"Invoked execute_tool json_validate -> status 0"}

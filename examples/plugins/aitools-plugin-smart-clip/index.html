@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Smart Clipboard Vault</title>
+  </head>
+  <body>
+    <main id="app">
+      <h1>Smart Clipboard Vault</h1>
+      <pre id="context-preview">Waiting for ContextEnvelope...</pre>
+      <button id="save-btn" type="button">Save Clip</button>
+    </main>
+    <script type="module">
+      // Uses the Tauri v2 `@aitools/sdk` command surface (`SPEC-012-R2`).
+      const preview = document.getElementById('context-preview');
+      const invoke = window.__TAURI_INTERNALS__?.invoke;
+
+      if (invoke) {
+        const docs = await invoke('plugin:aitools|db_all_docs', { prefix: 'clip:' });
+        preview.textContent = JSON.stringify(docs, null, 2);
+      }
+    </script>
+  </body>
+</html>

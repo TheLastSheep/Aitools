@@ -1,0 +1,3 @@
+{"seq":40,"ts":"2026-11-16T10:04:00.000150Z","level":"INFO","trace_id":"sdk-005","source":"plugin-smart-clip","plugin_id":"smart-clip","msg":"@aitools/sdk onContextEnter hydrated clip-1"}
+{"seq":41,"ts":"2026-11-16T10:04:00.003800Z","level":"DEBUG","trace_id":"sdk-005","source":"tauri_plugin_aitools::sdk","plugin_id":"smart-clip","span":"db_sync","duration_us":520,"msg":"db_put persisted clip-1 in isolated partition"}
+{"seq":42,"ts":"2026-11-16T10:04:00.009100Z","level":"INFO","trace_id":"sdk-005","source":"tauri_plugin_aitools::sdk","plugin_id":"smart-clip","msg":"telemetry_log correlated trace_id sdk-005"}

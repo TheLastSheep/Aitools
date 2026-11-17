@@ -1,0 +1,3 @@
+{"seq":1,"ts":"2026-11-16T10:00:00.000100Z","level":"INFO","trace_id":"wake-001","source":"aitools_native::context","span":"pre_focus_capture","duration_us":4120,"msg":"Captured active bundle com.apple.Terminal and selection"}
+{"seq":2,"ts":"2026-11-16T10:00:00.006200Z","level":"DEBUG","trace_id":"wake-001","source":"aitools_ai::context_fusion","span":"context_envelope","duration_us":890,"msg":"Classified selection as stack_trace and generated 3 zero-query suggestions"}
+{"seq":3,"ts":"2026-11-16T10:00:00.011400Z","level":"INFO","trace_id":"wake-001","source":"aitools::hotkey","span":"wake_to_paint","duration_us":11300,"msg":"Main shell painted with ContextEnvelope chip"}

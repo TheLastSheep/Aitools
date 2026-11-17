@@ -1,0 +1,14 @@
+{
+  "name": "Color Sample",
+  "version": "1.0.0",
+  "description": "Legacy v1 palette picker benchmark plugin",
+  "main": "index.html",
+  "preload": "preload.js",
+  "features": [
+    {
+      "code": "color_pick",
+      "explain": "Search and copy hex/RGB color presets",
+      "cmds": ["color", "rgb", "hex"]
+    }
+  ]
+}

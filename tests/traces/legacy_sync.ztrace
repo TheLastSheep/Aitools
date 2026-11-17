@@ -1,0 +1,3 @@
+{"seq":20,"ts":"2026-11-16T10:02:00.000100Z","level":"INFO","trace_id":"legacy-003","source":"aitools_js_bridge::shim","plugin_id":"legacy-color-sample","span":"quickjs_cold_start","duration_us":4200,"msg":"Initialized legacy exports wrapper and frozen window.aitools"}
+{"seq":21,"ts":"2026-11-16T10:02:00.007500Z","level":"DEBUG","trace_id":"legacy-003","source":"tauri_plugin_aitools::sync","plugin_id":"legacy-color-sample","span":"db_sync","duration_us":640,"msg":"aitools-sync db/put committed real _rev 1-ab12cd"}
+{"seq":22,"ts":"2026-11-16T10:02:00.012100Z","level":"INFO","trace_id":"legacy-003","source":"aitools_js_bridge::callback","plugin_id":"legacy-color-sample","msg":"callbackSetList delivered 3 color items to renderer"}

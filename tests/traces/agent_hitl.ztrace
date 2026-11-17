@@ -1,0 +1,4 @@
+{"seq":10,"ts":"2026-11-16T10:01:00.000050Z","level":"INFO","trace_id":"agent-hitl-002","source":"aitools_ai::planner","span":"agent_dag","msg":"Scheduled 2-node DAG (os.files.find -> os.clipboard.write)"}
+{"seq":11,"ts":"2026-11-16T10:01:00.003400Z","level":"DEBUG","trace_id":"agent-hitl-002","source":"aitools_ai::planner","msg":"Node n1 (Tier0ReadOnly) completed in 3350us"}
+{"seq":12,"ts":"2026-11-16T10:01:00.004100Z","level":"INFO","trace_id":"agent-hitl-002","source":"aitools_ai::hitl","msg":"HITL suspension requested for node n2 (Tier1StateMutating)"}
+{"seq":13,"ts":"2026-11-16T10:01:01.250000Z","level":"INFO","trace_id":"agent-hitl-002","source":"aitools_ai::planner","msg":"User approved node n2; DAG completed cleanly"}
