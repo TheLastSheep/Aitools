@@ -1,0 +1,14 @@
+[package]
+name = "aitools-js-bridge"
+version = "0.1.0"
+edition = "2021"
+description = "Lazy rquickjs preload sandbox and frozen triple-global ZTools/uTools/aitools compatibility shim"
+
+[dependencies]
+aitools-core = { path = "../aitools-core" }
+aitools-telemetry = { path = "../aitools-telemetry" }
+rquickjs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
