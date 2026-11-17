@@ -827,6 +827,59 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 5, "expected 5 golden .ztrace fixtures");
+        assert_eq!(count, 6, "expected 6 golden .ztrace fixtures");
+    }
+
+    #[test]
+    fn spec_008_builtin_plugins_pass_audit_and_classification() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let expected = [
+            (
+                "plugins/builtin/clipboard-history",
+                aitools_core::PluginRuntimeTier::NativeUi,
+            ),
+            (
+                "plugins/builtin/translation",
+                aitools_core::PluginRuntimeTier::NativeUi,
+            ),
+            (
+                "plugins/builtin/terminal-launchpad",
+                aitools_core::PluginRuntimeTier::NativeUi,
+            ),
+            (
+                "plugins/builtin/dev-docs-reference",
+                aitools_core::PluginRuntimeTier::NativeUi,
+            ),
+            (
+                "plugins/builtin/json-codec",
+                aitools_core::PluginRuntimeTier::RustWasm,
+            ),
+            (
+                "plugins/builtin/timestamp-calc",
+                aitools_core::PluginRuntimeTier::RustWasm,
+            ),
+            (
+                "plugins/builtin/snipaste-legacy",
+                aitools_core::PluginRuntimeTier::LegacyCompat,
+            ),
+            (
+                "plugins/builtin/todo-legacy",
+                aitools_core::PluginRuntimeTier::LegacyCompat,
+            ),
+        ];
+
+        for (rel, tier) in expected {
+            let plugin_dir = root.join(rel);
+            let cls = classify_plugin_dir(&plugin_dir)
+                .unwrap_or_else(|e| panic!("classify failed for {rel}: {e}"));
+            assert_eq!(cls.tier, tier, "unexpected tier for {rel}");
+
+            let report =
+                audit_plugin(&plugin_dir).unwrap_or_else(|e| panic!("audit failed for {rel}: {e}"));
+            assert!(
+                report.skill_valid,
+                "plugin {rel} failed SKILL.md validation"
+            );
+        }
     }
 }

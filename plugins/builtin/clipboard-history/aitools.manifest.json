@@ -1,0 +1,35 @@
+{
+  "id": "clipboard-history",
+  "name": "Clipboard History",
+  "version": "2.0.0",
+  "runtime": "native-ui",
+  "main": "index.html",
+  "permissions": ["clipboard.read", "clipboard.write", "db.read", "db.write", "ai.fast"],
+  "ai_tools": [
+    {
+      "name": "search_clipboard",
+      "description": "Search recent clipboard snippets stored in isolated LMDB.",
+      "risk_tier": "tier0_read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string" }
+        }
+      }
+    },
+    {
+      "name": "save_clipboard_pin",
+      "description": "Pin an important clipboard item to persistent LMDB history.",
+      "risk_tier": "tier1_state_mutating",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "text": { "type": "string" }
+        },
+        "required": ["id", "text"]
+      }
+    }
+  ],
+  "skill_file": "SKILL.md"
+}

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ToDo (Legacy Compat)</title>
+  </head>
+  <body>
+    <main>
+      <h1>ToDo Quick Checklist (Tier 1 Legacy Compat)</h1>
+      <ul id="todos"></ul>
+    </main>
+    <script>
+      if (window.utools && window.utools.db) {
+        const docs = window.utools.db.allDocs('todo:') || [];
+        const ul = document.getElementById('todos');
+        for (const doc of docs) {
+          const li = document.createElement('li');
+          li.textContent = doc.text || doc._id;
+          ul.appendChild(li);
+        }
+      }
+    </script>
+  </body>
+</html>

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Clipboard History</title>
+  </head>
+  <body>
+    <main id="app">
+      <h1>Clipboard History</h1>
+      <input id="filter" placeholder="Search pinned & recent clips..." />
+      <ul id="clips"></ul>
+    </main>
+    <script type="module">
+      const invoke = window.__TAURI_INTERNALS__?.invoke;
+      const list = document.getElementById('clips');
+
+      async function refresh(prefix = 'clip:') {
+        if (!invoke) return;
+        const docs = await invoke('plugin:aitools|db_all_docs', { prefix });
+        list.innerHTML = '';
+        for (const doc of docs) {
+          const li = document.createElement('li');
+          li.textContent = doc.data?.text ?? doc._id;
+          list.appendChild(li);
+        }
+      }
+
+      document.getElementById('filter').addEventListener('input', (e) => {
+        refresh('clip:' + (e.target.value || ''));
+      });
+      refresh();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "name": "todo-legacy",
+  "title": "ToDo Quick Checklist",
+  "version": "1.0.0",
+  "description": "Legacy uTools/ZTools todo checklist persisted via synchronous aitools-sync:// storage",
+  "main": "index.html",
+  "pluginSetting": {
+    "height": 500
+  },
+  "features": [
+    {
+      "code": "todo",
+      "label": "ToDo",
+      "explain": "Manage local todo tasks with synchronous uTools db compatibility",
+      "mainPush": true,
+      "cmds": ["ToDo", "待办", "任务清单", "todo list"]
+    }
+  ]
+}

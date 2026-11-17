@@ -156,6 +156,19 @@ impl WasmInstanceHandle {
             .get_typed_func::<(), i32>(&mut self.store, export_name)?;
         Ok(func.call(&mut self.store, ())?)
     }
+
+    /// Invokes an exported `(i32) -> i32` function inside the bounded store.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WasmHostError::Wasmtime`] if `export_name` is missing, has a mismatched
+    /// signature, traps, or runs out of fuel.
+    pub fn call_i32_unary(&mut self, export_name: &str, arg: i32) -> Result<i32> {
+        let func = self
+            .instance
+            .get_typed_func::<i32, i32>(&mut self.store, export_name)?;
+        Ok(func.call(&mut self.store, arg)?)
+    }
 }
 
 #[cfg(test)]
@@ -229,5 +242,49 @@ mod tests {
         assert_eq!(inst.call_i32_void("on_query").unwrap(), 1);
         assert_eq!(inst.call_i32_void("register_tools").unwrap(), 1);
         assert_eq!(inst.call_i32_void("execute_tool").unwrap(), 0);
+    }
+
+    #[test]
+    fn spec_012_r3_executes_builtin_wasm_plugins() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let host = WasmPluginHost::with_defaults().unwrap();
+
+        let mut json_codec = host
+            .instantiate_module_file(
+                "json-codec",
+                root.join("plugins/builtin/json-codec/plugin.wasm"),
+            )
+            .unwrap();
+        assert_eq!(
+            json_codec
+                .call_i32_void("aitools_plugin_api_version")
+                .unwrap(),
+            2
+        );
+        assert_eq!(json_codec.call_i32_void("register_tools").unwrap(), 2);
+        assert_eq!(
+            json_codec.call_i32_unary("base64_encoded_len", 5).unwrap(),
+            8
+        );
+        assert_eq!(json_codec.call_i32_void("execute_tool").unwrap(), 0);
+
+        let mut ts_calc = host
+            .instantiate_module_file(
+                "timestamp-calc",
+                root.join("plugins/builtin/timestamp-calc/plugin.wasm"),
+            )
+            .unwrap();
+        assert_eq!(
+            ts_calc.call_i32_void("aitools_plugin_api_version").unwrap(),
+            2
+        );
+        assert_eq!(ts_calc.call_i32_void("register_tools").unwrap(), 2);
+        assert_eq!(
+            ts_calc
+                .call_i32_unary("unix_epoch_days", 86_400 * 365)
+                .unwrap(),
+            365
+        );
+        assert_eq!(ts_calc.call_i32_void("execute_tool").unwrap(), 0);
     }
 }

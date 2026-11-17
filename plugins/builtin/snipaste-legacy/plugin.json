@@ -1,0 +1,53 @@
+{
+  "name": "snipaste-legacy",
+  "title": "Snipaste Pro (Legacy)",
+  "version": "2.0.0",
+  "description": "Screenshot capture, pinned floating image, pixel eyedropper, and offline OCR triggers",
+  "main": "index.html",
+  "preload": "preload.js",
+  "pluginSetting": {
+    "single": true,
+    "height": 640
+  },
+  "features": [
+    {
+      "code": "snipaste-snip",
+      "explain": "Launch interactive screen region capture & pixel eyedropper",
+      "cmds": ["snip", "截图", "截屏", "取色器"]
+    },
+    {
+      "code": "snipaste-paste",
+      "explain": "Pin selected image, text, or color code onto the desktop",
+      "cmds": [
+        "paste",
+        "贴图",
+        {
+          "type": "img",
+          "label": "Pin image to desktop"
+        },
+        {
+          "type": "over",
+          "label": "Pin text or hex color",
+          "minLength": 1,
+          "maxLength": 5000
+        }
+      ]
+    },
+    {
+      "code": "snipaste-ocr",
+      "explain": "Recognize text or QR barcodes from clipboard screenshots",
+      "cmds": [
+        "ocr",
+        "snipaste ocr",
+        {
+          "type": "files",
+          "label": "OCR image file",
+          "fileType": "file",
+          "extensions": ["png", "jpg", "jpeg", "webp"],
+          "minLength": 1,
+          "maxLength": 10
+        }
+      ]
+    }
+  ]
+}

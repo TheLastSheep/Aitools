@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Developer Quick Reference</title>
+  </head>
+  <body>
+    <main id="app">
+      <h1>Developer Quick Reference</h1>
+      <p>Rust std · Tauri v2 Capabilities · HTTP Status Codes · RegExp</p>
+      <pre id="bookmarks"></pre>
+    </main>
+    <script type="module">
+      const invoke = window.__TAURI_INTERNALS__?.invoke;
+      if (invoke) {
+        const docs = await invoke('plugin:aitools|db_all_docs', { prefix: 'doc:' });
+        document.getElementById('bookmarks').textContent = JSON.stringify(docs, null, 2);
+      }
+    </script>
+  </body>
+</html>

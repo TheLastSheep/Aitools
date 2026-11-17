@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>AI Translator</title>
+  </head>
+  <body>
+    <main id="app">
+      <h1>AI Translator</h1>
+      <textarea id="source" rows="5" placeholder="Paste or select text to translate..."></textarea>
+      <button id="translate-btn" type="button">Translate to English</button>
+      <pre id="result"></pre>
+    </main>
+    <script type="module">
+      const invoke = window.__TAURI_INTERNALS__?.invoke;
+      document.getElementById('translate-btn').addEventListener('click', async () => {
+        if (!invoke) return;
+        const text = document.getElementById('source').value;
+        const output = await invoke('plugin:aitools|ai_chat', {
+          request: {
+            profile: 'balanced',
+            system: 'Preserve technical terms and code spans.',
+            prompt: `Translate to English:\n${text}`
+          }
+        });
+        document.getElementById('result').textContent = output;
+      });
+    </script>
+  </body>
+</html>

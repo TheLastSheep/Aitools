@@ -1,0 +1,36 @@
+{
+  "id": "json-codec",
+  "name": "JSON Formatter & Codec",
+  "version": "1.0.0",
+  "runtime": "rust-wasm",
+  "wasm_entry": "plugin.wasm",
+  "permissions": ["clipboard.read", "clipboard.write"],
+  "ai_tools": [
+    {
+      "name": "format_json",
+      "description": "Validate, prettify, or minify JSON payloads inside zero-Webview Wasm sandbox.",
+      "risk_tier": "tier0_read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "input": { "type": "string" }
+        },
+        "required": ["input"]
+      }
+    },
+    {
+      "name": "codec_base64_url",
+      "description": "Encode or decode Base64/URL strings cleanly.",
+      "risk_tier": "tier0_read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "mode": { "type": "string" },
+          "input": { "type": "string" }
+        },
+        "required": ["mode", "input"]
+      }
+    }
+  ],
+  "skill_file": "SKILL.md"
+}

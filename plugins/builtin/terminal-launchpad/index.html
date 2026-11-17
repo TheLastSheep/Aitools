@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Terminal Launchpad</title>
+  </head>
+  <body>
+    <main id="app">
+      <h1>Terminal Shortcuts &amp; Launchpad</h1>
+      <ul id="shortcuts"></ul>
+    </main>
+    <script type="module">
+      const invoke = window.__TAURI_INTERNALS__?.invoke;
+      const list = document.getElementById('shortcuts');
+      if (invoke) {
+        const docs = await invoke('plugin:aitools|db_all_docs', { prefix: 'cmd:' });
+        for (const doc of docs) {
+          const li = document.createElement('li');
+          li.textContent = `${doc._id}: ${doc.data?.command ?? ''}`;
+          list.appendChild(li);
+        }
+      }
+    </script>
+  </body>
+</html>

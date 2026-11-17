@@ -1,0 +1,24 @@
+{
+  "id": "translation",
+  "name": "AI Translator",
+  "version": "2.0.0",
+  "runtime": "native-ui",
+  "main": "index.html",
+  "permissions": ["clipboard.read", "clipboard.write", "ai.balanced", "notification"],
+  "ai_tools": [
+    {
+      "name": "translate_text",
+      "description": "Translate technical prose, error messages, or UI copy across EN/ZH/JA/KO.",
+      "risk_tier": "tier0_read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string" },
+          "target_lang": { "type": "string" }
+        },
+        "required": ["text", "target_lang"]
+      }
+    }
+  ],
+  "skill_file": "SKILL.md"
+}

@@ -1,0 +1,23 @@
+{
+  "id": "dev-docs-reference",
+  "name": "Developer Quick Reference",
+  "version": "1.0.0",
+  "runtime": "native-ui",
+  "main": "index.html",
+  "permissions": ["db.read", "db.write", "ai.fast"],
+  "ai_tools": [
+    {
+      "name": "lookup_dev_doc",
+      "description": "Search built-in cheat sheets for Rust std, Tauri v2 ACLs, HTTP codes, and regex.",
+      "risk_tier": "tier0_read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "topic": { "type": "string" }
+        },
+        "required": ["topic"]
+      }
+    }
+  ],
+  "skill_file": "SKILL.md"
+}

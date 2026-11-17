@@ -1,0 +1,4 @@
+{"seq":50,"ts":"2026-11-16T11:00:00.000100Z","level":"INFO","trace_id":"dogfood-006","source":"aitools::search","span":"wake_to_paint","duration_us":2100,"msg":"Matched builtin Tier 2 plugin clipboard-history"}
+{"seq":51,"ts":"2026-11-16T11:00:00.004200Z","level":"DEBUG","trace_id":"dogfood-006","source":"aitools_wasm_host","plugin_id":"json-codec","span":"wasm_instantiate","duration_us":950,"msg":"Instantiated json-codec plugin.wasm for payload format_json"}
+{"seq":52,"ts":"2026-11-16T11:00:00.006800Z","level":"DEBUG","trace_id":"dogfood-006","source":"tauri_plugin_aitools::sdk","plugin_id":"translation","msg":"@aitools/sdk ai_chat routed profile=balanced"}
+{"seq":53,"ts":"2026-11-16T11:00:00.009400Z","level":"INFO","trace_id":"dogfood-006","source":"aitools_js_bridge::callback","plugin_id":"snipaste-legacy","msg":"Tier 1 snipaste-ocr callbackSetList returned 2 items"}
