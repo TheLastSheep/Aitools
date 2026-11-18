@@ -1,6 +1,6 @@
 [package]
 name = "aitools-wasm-host"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Sandboxed Wasmtime host with 64 MB memory & fuel/epoch caps for rust-wasm plugins"
 

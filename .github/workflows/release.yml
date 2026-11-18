@@ -25,6 +25,33 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+      - name: Verify tag and manifest version parity
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const ref = String(process.env.REF_NAME || '').trim();
+          const tauriConf = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+          const rootPkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const cargoToml = fs.readFileSync('src-tauri/Cargo.toml', 'utf8');
+          const cargoVerMatch = cargoToml.match(/^version\s*=\s*"([^"]+)"/m);
+          const cargoVer = cargoVerMatch ? cargoVerMatch[1] : '';
+
+          console.log(`Manifest versions: tauri.conf.json=${tauriConf.version}, package.json=${rootPkg.version}, src-tauri/Cargo.toml=${cargoVer}, ref=${ref}`);
+          if (tauriConf.version !== rootPkg.version || tauriConf.version !== cargoVer) {
+            console.error('ERROR: Version mismatch across tauri.conf.json, package.json, and src-tauri/Cargo.toml');
+            process.exit(1);
+          }
+          if (ref.startsWith('v')) {
+            const expected = ref.slice(1);
+            if (tauriConf.version !== expected) {
+              console.error(`ERROR: Tag '${ref}' (expected version '${expected}') does not match tauri.conf.json version '${tauriConf.version}'`);
+              process.exit(1);
+            }
+          }
+          NODE
       - name: Install workspace dependencies
         run: pnpm install --frozen-lockfile
       - name: Run Rust formatting, Clippy, Rustdoc, and tests
@@ -50,6 +77,27 @@ jobs:
           pnpm --filter @aitools/renderer-svelte check
           pnpm --filter @aitools/renderer-svelte build
           ./packages/renderer-svelte/node_modules/.bin/tsc -p packages/aitools-sdk/tsconfig.json --noEmit
+      - name: Prepare clean single draft release for tag
+        if: startsWith(github.ref_name, 'v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          for id in $(gh api "repos/$REPO/releases" --jq ".[] | select(.draft == true and .tag_name == \"$TAG\") | .id"); do
+            echo "Deleting stale draft release id=$id for tag=$TAG"
+            gh api -X DELETE "repos/$REPO/releases/$id"
+          done
+          if ! gh api "repos/$REPO/releases/tags/$TAG" >/dev/null 2>&1; then
+            gh api -X POST "repos/$REPO/releases" \
+              -f tag_name="$TAG" \
+              -f name="aitools $TAG" \
+              -f body="Automated multi-platform release verified by SDD Quality Gate (\`SPEC-000\` <= 18 MiB native installer / <= 95 MiB AppImage budget)." \
+              -F draft=true \
+              -F prerelease="$(echo "$TAG" | grep -q '-' && echo true || echo false)" >/dev/null
+            echo "Created clean draft release for $TAG"
+          fi
 
   release:
     needs: pre-flight-sdd-gate

@@ -1,6 +1,6 @@
 [package]
 name = "aitools-ai"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "AI-native dual-mode launcher promotion, model broker, semantic tool router, 3-tier HITL guard, and harness primitives for aitools"
 

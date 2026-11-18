@@ -1,6 +1,6 @@
 [package]
 name = "aitools-js-bridge"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Lazy rquickjs preload sandbox and frozen triple-global ZTools/uTools/aitools compatibility shim"
 

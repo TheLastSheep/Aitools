@@ -1,6 +1,6 @@
 [package]
 name = "aitools-native"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Native OS hooks, double-tap hotkey detector, bounded app catalog, pre-focus context, and keychain secrets for aitools"
 

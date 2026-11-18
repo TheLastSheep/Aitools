@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "aitools-ai"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aitools-core",
  "aitools-telemetry",
@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "aitools-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aitools-ai",
  "aitools-core",
@@ -72,7 +72,7 @@ dependencies = [
 
 [[package]]
 name = "aitools-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aitools-telemetry",
  "chrono",
@@ -94,7 +94,7 @@ dependencies = [
 
 [[package]]
 name = "aitools-desktop"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aitools-ai",
  "aitools-core",
@@ -115,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "aitools-js-bridge"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aitools-core",
  "aitools-telemetry",
@@ -128,7 +128,7 @@ dependencies = [
 
 [[package]]
 name = "aitools-native"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aitools-telemetry",
  "arboard",
@@ -142,7 +142,7 @@ dependencies = [
 
 [[package]]
 name = "aitools-telemetry"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "regex",
@@ -157,7 +157,7 @@ dependencies = [
 
 [[package]]
 name = "aitools-wasm-host"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aitools-core",
  "aitools-telemetry",
@@ -5212,7 +5212,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-aitools"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aitools-ai",
  "aitools-core",

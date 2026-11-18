@@ -1,6 +1,6 @@
 [package]
 name = "aitools-core"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Core models, LMDB storage/sync engine, CJK Pinyin & hybrid search matcher for aitools"
 
