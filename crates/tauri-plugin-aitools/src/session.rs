@@ -1,12 +1,13 @@
 //! Plugin runtime session orchestration, host bridge handlers, and desktop dispatch (`SPEC-015` v2.0, `SPEC-016`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aitools_ai::broker::{ApiKeyProvider, ModelBroker};
+use aitools_ai::launcher::LauncherHit;
 use aitools_core::{
     current_ztools_platform, load_plugin_dir, Cmd, Feature, FeatureEntry, FeatureSearchIndex,
     LoadedPlugin, PluginRuntimeTier, StorageEngine,
@@ -1019,12 +1020,16 @@ impl PluginSessionManager {
                     .as_deref()
                     .filter(|s| !s.is_empty())
                     .map_or_else(|| app.path.clone(), ToString::to_string);
+                let icon = app
+                    .icon_path
+                    .as_deref()
+                    .and_then(|p| self.mounts.register_icon(p));
                 all_features.push(FeatureEntry {
                     code: code.clone(),
                     plugin_id: "system-apps".to_string(),
                     plugin_name: "Application".to_string(),
                     label: app.name.clone(),
-                    icon: None,
+                    icon,
                     explain,
                     cmds,
                     main_push: false,
@@ -1043,15 +1048,40 @@ impl PluginSessionManager {
             sorted_ids.sort();
             for id in sorted_ids {
                 if let Some(plugin) = plugins.get(id) {
-                    all_features.extend(plugin.to_feature_entries_for_platform(Some(platform)));
+                    let mut map_local_icon = |local_path: &Path| -> Option<String> {
+                        if local_path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
+                        {
+                            None
+                        } else {
+                            self.mounts.register_icon(local_path)
+                        }
+                    };
+                    all_features.extend(
+                        plugin.to_feature_entries_with_icon_mapper(
+                            Some(platform),
+                            &mut map_local_icon,
+                        ),
+                    );
                     if let Some(extra) = dyn_map.get(id) {
+                        let plugin_icon = plugin
+                            .resolve_icon_with_mapper(
+                                plugin.declared_icon_raw(),
+                                &mut map_local_icon,
+                            )
+                            .or_else(|| plugin.icon.clone());
                         for feat in extra {
+                            let icon = plugin
+                                .resolve_icon_with_mapper(feat.icon.as_deref(), &mut map_local_icon)
+                                .or_else(|| plugin_icon.clone());
                             all_features.push(FeatureEntry {
                                 code: feat.code.clone(),
                                 plugin_id: plugin.id.clone(),
                                 plugin_name: plugin.name.clone(),
                                 label: feat.label.clone().unwrap_or_else(|| plugin.name.clone()),
-                                icon: feat.icon.clone().or_else(|| plugin.icon.clone()),
+                                icon,
                                 explain: feat.explain.clone(),
                                 cmds: feat.cmds.clone(),
                                 main_push: feat.main_push,
@@ -1083,20 +1113,143 @@ impl PluginSessionManager {
         }
         if let Ok(plugins) = self.loaded_plugins.read() {
             if let Some(plugin) = plugins.get(plugin_id) {
-                if plugin.tier == PluginRuntimeTier::RustWasm
-                    || (plugin.wasm_entry.is_some() && plugin.main.is_none())
-                {
-                    return Some("wasm".to_string());
-                }
-                if plugin.main.is_some() {
-                    return Some("plugin".to_string());
-                }
-                if plugin.preload.is_some() {
-                    return Some("list".to_string());
-                }
+                return Some(classify_plugin_kind(plugin).to_string());
             }
         }
         None
+    }
+
+    /// Returns curated home-grid items combining built-in plugins, installed ZTools plugins,
+    /// and popular macOS/desktop apps (`SPEC-016-R1`, `SPEC-017-R3`).
+    #[must_use]
+    pub fn featured_home_items(&self, limit: usize) -> Vec<LauncherHit> {
+        let cap = limit.clamp(1, 54);
+        let platform = current_ztools_platform();
+
+        let mut map_local_icon = |local_path: &Path| -> Option<String> {
+            if local_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
+            {
+                None
+            } else {
+                self.mounts.register_icon(local_path)
+            }
+        };
+
+        let mut builtin_hits: Vec<LauncherHit> = Vec::new();
+        let mut ztools_hits: Vec<LauncherHit> = Vec::new();
+        if let Ok(plugins) = self.loaded_plugins.read() {
+            let mut by_builtin: HashMap<&str, &LoadedPlugin> = HashMap::new();
+            let mut others: Vec<&LoadedPlugin> = Vec::new();
+            for plugin in plugins.values() {
+                if let Some(pos) = CURATED_BUILTIN_ORDER.iter().position(|id| *id == plugin.id) {
+                    by_builtin.insert(CURATED_BUILTIN_ORDER[pos], plugin);
+                } else {
+                    others.push(plugin);
+                }
+            }
+            for builtin_id in CURATED_BUILTIN_ORDER {
+                if let Some(plugin) = by_builtin.get(builtin_id) {
+                    if let Some(hit) = plugin_primary_hit(plugin, platform, &mut map_local_icon) {
+                        builtin_hits.push(hit);
+                    }
+                }
+            }
+            let mut ztools_candidates: Vec<(bool, String, LauncherHit)> = Vec::new();
+            for plugin in others {
+                if let Some(hit) = plugin_primary_hit(plugin, platform, &mut map_local_icon) {
+                    let has_icon = hit.icon.is_some();
+                    let sort_name = hit.label.to_ascii_lowercase();
+                    ztools_candidates.push((!has_icon, sort_name, hit));
+                }
+            }
+            ztools_candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+            ztools_hits.extend(ztools_candidates.into_iter().map(|(_, _, hit)| hit));
+        }
+
+        let mut app_hits: Vec<LauncherHit> = Vec::new();
+        if let Ok(apps) = self.app_catalog.read() {
+            let mut ranked_apps: Vec<(usize, bool, String, &LauncherApp)> = Vec::new();
+            for app in apps.values() {
+                let rank = popular_app_rank(app);
+                let has_icon = app.icon_path.is_some();
+                ranked_apps.push((rank, !has_icon, app.name.to_ascii_lowercase(), app));
+            }
+            ranked_apps.sort_by(|a, b| {
+                a.0.cmp(&b.0)
+                    .then_with(|| a.1.cmp(&b.1))
+                    .then_with(|| a.2.cmp(&b.2))
+            });
+            for (_, _, _, app) in ranked_apps {
+                let explain = app
+                    .bundle_id
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map_or_else(|| app.path.clone(), ToString::to_string);
+                let icon = app
+                    .icon_path
+                    .as_deref()
+                    .and_then(|p| self.mounts.register_icon(p));
+                app_hits.push(LauncherHit {
+                    feature_code: format!("app:{}", app.name),
+                    plugin_id: "system-apps".to_string(),
+                    label: app.name.clone(),
+                    plugin_name: "Application".to_string(),
+                    description: explain.clone(),
+                    icon,
+                    kind: Some("app".to_string()),
+                    score: 0,
+                    match_type: "featured".to_string(),
+                    confidence: 1.0,
+                    explain,
+                });
+            }
+        }
+
+        // Balance the initial 2-row (18-slot) viewport across built-ins, ZTools plugins, and
+        // macOS apps, then fill remaining slots up to `cap`.
+        let mut out: Vec<LauncherHit> = Vec::with_capacity(cap);
+        let mut seen: HashSet<(String, String)> = HashSet::with_capacity(cap);
+        let mut push_unique = |hit: LauncherHit, out: &mut Vec<LauncherHit>| {
+            if out.len() >= cap {
+                return;
+            }
+            if seen.insert((hit.plugin_id.clone(), hit.feature_code.clone())) {
+                out.push(hit);
+            }
+        };
+
+        let mut builtin_iter = builtin_hits.into_iter();
+        let mut ztools_iter = ztools_hits.into_iter();
+        let mut app_iter = app_hits.into_iter();
+
+        for hit in builtin_iter.by_ref().take(6) {
+            push_unique(hit, &mut out);
+        }
+        for hit in ztools_iter.by_ref().take(6) {
+            push_unique(hit, &mut out);
+        }
+        for hit in app_iter.by_ref().take(6) {
+            push_unique(hit, &mut out);
+        }
+        for hit in builtin_iter {
+            push_unique(hit, &mut out);
+        }
+        for hit in ztools_iter {
+            push_unique(hit, &mut out);
+        }
+        for hit in app_iter {
+            push_unique(hit, &mut out);
+        }
+
+        for (idx, hit) in out.iter_mut().enumerate() {
+            hit.score = i32::try_from(100usize.saturating_sub(idx))
+                .unwrap_or(1)
+                .max(1);
+        }
+        out
     }
 
     /// Returns a loaded plugin descriptor by ID, if registered.
@@ -1419,4 +1572,120 @@ pub(crate) fn now_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+const CURATED_BUILTIN_ORDER: &[&str] = &[
+    "clipboard-history",
+    "translation",
+    "terminal-launchpad",
+    "dev-docs-reference",
+    "json-codec",
+    "timestamp-calc",
+    "snipaste-legacy",
+    "todo-legacy",
+];
+
+const POPULAR_MACOS_APPS: &[&str] = &[
+    "Safari",
+    "Google Chrome",
+    "Visual Studio Code",
+    "ZTools",
+    "Terminal",
+    "iTerm",
+    "Warp",
+    "ChatGPT",
+    "Antigravity",
+    "Figma",
+    "Lark",
+    "WeChat",
+    "Slack",
+    "Finder",
+    "Calculator",
+    "Notes",
+    "System Settings",
+    "Activity Monitor",
+    "Calendar",
+    "Mail",
+    "Messages",
+    "Photos",
+    "Music",
+    "Preview",
+    "TextEdit",
+    "Shortcuts",
+    "Xcode",
+    "Cursor",
+    "Firefox",
+    "Microsoft Edge",
+    "Obsidian",
+    "Notion",
+    "Screenshot",
+    "Disk Utility",
+    "Console",
+];
+
+fn classify_plugin_kind(plugin: &LoadedPlugin) -> &'static str {
+    if plugin.tier == PluginRuntimeTier::RustWasm
+        || (plugin.wasm_entry.is_some() && plugin.main.is_none())
+    {
+        "wasm"
+    } else if plugin.main.is_some() {
+        "plugin"
+    } else if plugin.preload.is_some() {
+        "list"
+    } else {
+        "plugin"
+    }
+}
+
+fn plugin_primary_hit<F>(
+    plugin: &LoadedPlugin,
+    platform: &str,
+    map_local_icon: &mut F,
+) -> Option<LauncherHit>
+where
+    F: FnMut(&Path) -> Option<String>,
+{
+    let entry = plugin
+        .to_feature_entries_with_icon_mapper(Some(platform), map_local_icon)
+        .into_iter()
+        .next()?;
+    let label = if entry.label.trim().is_empty() {
+        plugin.name.clone()
+    } else {
+        entry.label
+    };
+    let description = if entry.explain.trim().is_empty() {
+        plugin
+            .description
+            .clone()
+            .unwrap_or_else(|| plugin.name.clone())
+    } else {
+        entry.explain
+    };
+    Some(LauncherHit {
+        feature_code: entry.code,
+        plugin_id: plugin.id.clone(),
+        label,
+        plugin_name: plugin.name.clone(),
+        description: description.clone(),
+        icon: entry.icon,
+        kind: Some(classify_plugin_kind(plugin).to_string()),
+        score: 0,
+        match_type: "featured".to_string(),
+        confidence: 1.0,
+        explain: description,
+    })
+}
+
+fn popular_app_rank(app: &LauncherApp) -> usize {
+    POPULAR_MACOS_APPS
+        .iter()
+        .position(|candidate| {
+            app.name.eq_ignore_ascii_case(candidate)
+                || app
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(candidate))
+        })
+        .unwrap_or(usize::MAX)
 }

@@ -149,11 +149,18 @@ impl AitoolsState {
         telemetry: Option<Arc<TelemetryHandle>>,
         initial_features: &[FeatureEntry],
     ) -> Result<Self> {
-        let storage = Arc::new(StorageEngine::open(db_dir)?);
+        let db_path = db_dir.as_ref();
+        let storage = Arc::new(StorageEngine::open(db_path)?);
         let search_index = Arc::new(RwLock::new(FeatureSearchIndex::try_build(
             initial_features,
         )?));
         let mounts = PluginMountRegistry::new();
+        let default_icon_cache = if db_path.file_name().is_some_and(|n| n == "lmdb") {
+            db_path.parent().unwrap_or(db_path).join("icon-cache")
+        } else {
+            db_path.join("icon-cache")
+        };
+        mounts.set_icon_cache_dir(default_icon_cache);
         let wasm_host = Arc::new(WasmPluginHost::with_defaults()?);
         let mut default_broker = ModelBroker::new();
         default_broker.register_profile(ModelProfile {
@@ -385,11 +392,18 @@ impl<R: Runtime> HostWindowController for TauriHostController<R> {
 
     fn set_expand_height(&self, height: f64) -> std::result::Result<(), String> {
         if let Some(win) = self.app.get_webview_window("main") {
-            let cur_w = win
-                .inner_size()
-                .ok()
-                .map_or(780.0, |sz| f64::from(sz.width.max(480)));
-            let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(cur_w, height)));
+            let clamped_h = if height.is_finite() {
+                height.clamp(58.0, 594.0)
+            } else {
+                58.0
+            };
+            let anchor_pos = win.outer_position().ok();
+            let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+                800.0, clamped_h,
+            )));
+            if let Some(pos) = anchor_pos {
+                let _ = win.set_position(pos);
+            }
         }
         Ok(())
     }
@@ -550,6 +564,17 @@ fn search_features<R: Runtime>(
         }
     }
     Ok(decision)
+}
+
+#[tauri::command]
+fn featured_home_items<R: Runtime>(
+    limit: Option<usize>,
+    webview: tauri::Webview<R>,
+    state: tauri::State<'_, AitoolsState>,
+) -> std::result::Result<Vec<aitools_ai::launcher::LauncherHit>, String> {
+    ensure_host_webview(webview.label())?;
+    let clamped = limit.unwrap_or(27).clamp(1, 54);
+    Ok(state.sessions.featured_home_items(clamped))
 }
 
 #[tauri::command]
@@ -1201,9 +1226,11 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         .register_asynchronous_uri_scheme_protocol("aitools-plugin", |ctx, request, responder| {
             let label = ctx.webview_label().to_string();
             let uri = request.uri().to_string();
-            let state = ctx.app_handle().state::<AitoolsState>();
-            let reply = handle_plugin_asset_request(&label, &uri, &state.mounts);
-            responder.respond(to_http_response(reply));
+            let mounts = ctx.app_handle().state::<AitoolsState>().mounts.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let reply = handle_plugin_asset_request(&label, &uri, &mounts);
+                responder.respond(to_http_response(reply));
+            });
         })
         .register_asynchronous_uri_scheme_protocol("aitools-sync", |ctx, request, responder| {
             let label = ctx.webview_label().to_string();
@@ -1215,6 +1242,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         })
         .invoke_handler(tauri::generate_handler![
             search_features,
+            featured_home_items,
             zero_query_suggestions,
             launch_item,
             search_list_mode,
@@ -1765,5 +1793,170 @@ mod tests {
             .plugins
             .iter()
             .any(|p| p.plugin_id == list_plugin_id && p.active_tier == "QuickJsNodeCompat"));
+    }
+
+    #[test]
+    fn inv_sec_01_app_icon_protocol_enforces_host_allowlist_and_caches_png() {
+        let dir = TempDir::new().unwrap();
+        let cache_dir = dir.path().join("icon-cache");
+        let plugin_dir = dir.path().join("demo");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("index.html"), "<h1>demo</h1>").unwrap();
+
+        let src_png = dir.path().join("sample.png");
+        let img = aitools_native::app_catalog::render_app_icon_png_128;
+        let _ = img;
+        std::fs::write(
+            &src_png,
+            base64::engine::general_purpose::STANDARD
+                .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+                .unwrap(),
+        )
+        .unwrap();
+
+        let mounts = PluginMountRegistry::new();
+        mounts.set_icon_cache_dir(&cache_dir);
+        mounts.register_root("demo", &plugin_dir).unwrap();
+        let icon_uri = mounts.register_icon(&src_png).expect("icon uri");
+        assert!(icon_uri.starts_with("aitools-plugin://__app_icon__/"));
+        assert!(icon_uri.ends_with(".png"));
+
+        // Host main & dsh can read registered 16-hex.png icons.
+        let main_ok = handle_plugin_asset_request("main", &icon_uri, &mounts);
+        assert_eq!(main_ok.status, 200);
+        assert_eq!(main_ok.content_type, "image/png");
+        assert!(main_ok.body.starts_with(b"\x89PNG\r\n\x1a\n"));
+
+        let dsh_ok = handle_plugin_asset_request("dsh", &icon_uri, &mounts);
+        assert_eq!(dsh_ok.status, 200);
+        assert_eq!(dsh_ok.body, main_ok.body);
+
+        let icon_id = icon_uri
+            .strip_prefix("aitools-plugin://__app_icon__/")
+            .unwrap()
+            .strip_suffix(".png")
+            .unwrap();
+        assert!(cache_dir.join(format!("{icon_id}.png")).is_file());
+
+        // Sandboxed plugin-* webviews MUST get 403 for __app_icon__!
+        let plugin_blocked = handle_plugin_asset_request("plugin-demo", &icon_uri, &mounts);
+        assert_eq!(plugin_blocked.status, 403);
+
+        // main/dsh MUST get 403 for non-__app_icon__ hosts, unregistered hex IDs, or invalid paths.
+        assert_eq!(
+            handle_plugin_asset_request("main", "aitools-plugin://demo/index.html", &mounts).status,
+            403
+        );
+        assert_eq!(
+            handle_plugin_asset_request(
+                "main",
+                "aitools-plugin://__app_icon__/0000000000000000.png",
+                &mounts
+            )
+            .status,
+            403
+        );
+        assert_eq!(
+            handle_plugin_asset_request(
+                "main",
+                "aitools-plugin://__app_icon__/../secret.png",
+                &mounts
+            )
+            .status,
+            403
+        );
+        assert_eq!(
+            handle_plugin_asset_request(
+                "main",
+                "aitools-plugin://__app_icon__/nothex.png",
+                &mounts
+            )
+            .status,
+            403
+        );
+        // Existing plugin isolation stays intact.
+        assert_eq!(
+            handle_plugin_asset_request("plugin-demo", "aitools-plugin://demo/index.html", &mounts)
+                .status,
+            200
+        );
+        assert_eq!(
+            handle_plugin_asset_request("plugin-evil", "aitools-plugin://demo/index.html", &mounts)
+                .status,
+            403
+        );
+    }
+
+    #[test]
+    fn spec_016_r1_featured_home_items_combines_plugins_and_apps_with_icon_uris() {
+        let dir = TempDir::new().unwrap();
+        let state = AitoolsState::open(dir.path().join("lmdb"), None, &[]).unwrap();
+
+        let workspace_builtin = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("plugins")
+            .join("builtin");
+        let _ = state.sessions.sync_plugins_directory(&workspace_builtin);
+
+        // Add a local ZTools-style plugin with a PNG logo file.
+        let z_dir = dir.path().join("ztools");
+        let z_plugin = z_dir.join("z-sample");
+        std::fs::create_dir_all(&z_plugin).unwrap();
+        std::fs::write(
+            z_plugin.join("plugin.json"),
+            r#"{"name":"ZSample","title":"ZSample Tool","version":"1.0.0","logo":"logo.png","main":"index.html","features":[{"code":"z-open","explain":"Sample tool","cmds":["zsample"]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(z_plugin.join("index.html"), "<h1>z</h1>").unwrap();
+        std::fs::write(
+            z_plugin.join("logo.png"),
+            base64::engine::general_purpose::STANDARD
+                .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+                .unwrap(),
+        )
+        .unwrap();
+        let _ = state.sessions.sync_plugins_directory(&z_dir);
+
+        // Register a mock app with icon_path.
+        let app_icon = dir.path().join("Safari.png");
+        std::fs::copy(z_plugin.join("logo.png"), &app_icon).unwrap();
+        state
+            .sessions
+            .register_apps(vec![aitools_native::app_catalog::LauncherApp {
+                name: "Safari".to_string(),
+                path: "/System/Cryptexes/App/System/Applications/Safari.app".to_string(),
+                aliases: vec!["com.apple.Safari".to_string()],
+                bundle_id: Some("com.apple.Safari".to_string()),
+                icon_path: Some(app_icon.to_string_lossy().into_owned()),
+            }])
+            .unwrap();
+
+        let items = state.sessions.featured_home_items(27);
+        assert!(items.len() >= 10);
+        assert!(items.iter().any(|h| h.plugin_id == "clipboard-history"));
+        let z_hit = items.iter().find(|h| h.plugin_id == "zsample").unwrap();
+        assert!(z_hit
+            .icon
+            .as_deref()
+            .is_some_and(|u| u.starts_with("aitools-plugin://__app_icon__/")));
+        let safari_hit = items
+            .iter()
+            .find(|h| h.feature_code == "app:Safari")
+            .unwrap();
+        assert_eq!(safari_hit.kind.as_deref(), Some("app"));
+        assert!(safari_hit
+            .icon
+            .as_deref()
+            .is_some_and(|u| u.starts_with("aitools-plugin://__app_icon__/")));
+
+        let capped = state.sessions.featured_home_items(3);
+        assert_eq!(capped.len(), 3);
+
+        // Host-only check: featured-home-items MUST be in default.toml and NOT in guest-sandbox.toml.
+        let default_toml = include_str!("../permissions/default.toml");
+        let guest_toml = include_str!("../permissions/guest-sandbox.toml");
+        assert!(default_toml.contains("allow-featured-home-items"));
+        assert!(!guest_toml.contains("featured-home-items"));
     }
 }

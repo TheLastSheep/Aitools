@@ -5,6 +5,7 @@ Default permissions for the aitools Tauri plugin
 #### This default permission set includes the following:
 
 - `allow-search-features`
+- `allow-featured-home-items`
 - `allow-zero-query-suggestions`
 - `allow-launch-item`
 - `allow-search-list-mode`
@@ -291,6 +292,32 @@ Enables the dsh_set_fault_injection command without any pre-configured scope.
 <td>
 
 Denies the dsh_set_fault_injection command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`aitools:allow-featured-home-items`
+
+</td>
+<td>
+
+Enables the featured_home_items command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`aitools:deny-featured-home-items`
+
+</td>
+<td>
+
+Denies the featured_home_items command without any pre-configured scope.
 
 </td>
 </tr>

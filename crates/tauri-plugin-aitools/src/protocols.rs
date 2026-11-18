@@ -8,12 +8,17 @@ use aitools_core::storage::{
     validate_sync_caller, PluginDataQuery, PluginDataRemove, StorageEngine,
 };
 use aitools_core::{AitoolsError, Document};
+use aitools_native::app_catalog::render_app_icon_png_128;
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tracing::info_span;
 
 use crate::session::PluginSessionManager;
+
+/// Reserved `aitools-plugin://` authority serving host-cached `128×128` PNG app/plugin icons (`SPEC-016-R1`).
+pub const APP_ICON_HOST: &str = "__app_icon__";
 
 /// DSH runtime fault injection switches (`SPEC-013-R3`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,53 +63,174 @@ impl ProtocolReply {
     }
 }
 
-/// Registry of installed plugin filesystem roots for `aitools-plugin://` resolution.
+/// Registry of installed plugin filesystem roots and cached application icons for `aitools-plugin://` resolution.
 #[derive(Debug, Clone, Default)]
 pub struct PluginMountRegistry {
     roots: Arc<RwLock<HashMap<String, PathBuf>>>,
+    icons: Arc<RwLock<HashMap<String, PathBuf>>>,
+    icon_cache_dir: Arc<RwLock<Option<PathBuf>>>,
 }
 
 impl PluginMountRegistry {
-    /// Creates an empty plugin mount registry.
+    /// Creates an empty plugin mount and icon registry.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Configures the directory where rendered `128×128` PNG icons are cached on disk.
+    pub fn set_icon_cache_dir(&self, dir: impl AsRef<Path>) {
+        if let Ok(mut guard) = self.icon_cache_dir.write() {
+            *guard = Some(dir.as_ref().to_path_buf());
+        }
+    }
+
+    /// Returns the configured icon cache directory, if set.
+    #[must_use]
+    pub fn icon_cache_dir(&self) -> Option<PathBuf> {
+        self.icon_cache_dir.read().ok().and_then(|g| g.clone())
     }
 
     /// Canonicalizes and registers `root` as the asset directory for `plugin_id`.
     ///
     /// # Errors
     ///
-    /// Returns an [`std::io::Error`] if `root` cannot be canonicalized.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal registry lock is poisoned.
+    /// Returns an [`std::io::Error`] if `plugin_id` is reserved, `root` cannot be canonicalized,
+    /// or the internal lock is poisoned.
     pub fn register_root(&self, plugin_id: &str, root: impl AsRef<Path>) -> std::io::Result<()> {
+        if plugin_id == APP_ICON_HOST {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "__app_icon__ is a reserved protocol host",
+            ));
+        }
         let canonical = std::fs::canonicalize(root)?;
-        self.roots
+        let mut guard = self
+            .roots
             .write()
-            .expect("plugin mount lock poisoned")
-            .insert(plugin_id.to_string(), canonical);
+            .map_err(|_| std::io::Error::other("plugin mount lock poisoned"))?;
+        guard.insert(plugin_id.to_string(), canonical);
         Ok(())
     }
 
     /// Returns the canonicalized asset root registered for `plugin_id`, if any.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal registry lock is poisoned.
     #[must_use]
     pub fn get_root(&self, plugin_id: &str) -> Option<PathBuf> {
         self.roots
             .read()
-            .expect("plugin mount lock poisoned")
-            .get(plugin_id)
-            .cloned()
+            .ok()
+            .and_then(|g| g.get(plugin_id).cloned())
+    }
+
+    /// Registers a source icon file path and returns its `aitools-plugin://__app_icon__/<id>.png` URI.
+    ///
+    /// Returns `None` if `source_path` does not point to an existing regular file.
+    #[must_use]
+    pub fn register_icon(&self, source_path: impl AsRef<Path>) -> Option<String> {
+        let raw = source_path.as_ref();
+        if !raw.is_file() {
+            return None;
+        }
+        let canonical = std::fs::canonicalize(raw).unwrap_or_else(|_| raw.to_path_buf());
+        let icon_id = icon_id_for_path(&canonical);
+        if self
+            .icons
+            .read()
+            .ok()
+            .is_some_and(|g| g.contains_key(&icon_id))
+        {
+            return Some(format!("aitools-plugin://{APP_ICON_HOST}/{icon_id}.png"));
+        }
+        if let Ok(mut guard) = self.icons.write() {
+            guard.insert(icon_id.clone(), canonical);
+            return Some(format!("aitools-plugin://{APP_ICON_HOST}/{icon_id}.png"));
+        }
+        None
+    }
+
+    /// Looks up the source path registered for a 16-char hex `icon_id`.
+    #[must_use]
+    pub fn get_icon_source(&self, icon_id: &str) -> Option<PathBuf> {
+        self.icons.read().ok().and_then(|g| g.get(icon_id).cloned())
     }
 }
 
-/// Serves `aitools-plugin://<plugin_id>/<asset_path>` with `INV-SEC-01` & `SPEC-006-R3` canonicalization.
+fn icon_id_for_path(path: &Path) -> String {
+    let digest = Sha256::digest(path.to_string_lossy().as_bytes());
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7]
+    )
+}
+
+fn parse_valid_icon_id_filename(rel_path: &str) -> Option<&str> {
+    let stem = rel_path.strip_suffix(".png")?;
+    if stem.len() != 16 || !stem.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return None;
+    }
+    Some(stem)
+}
+
+fn is_cached_icon_fresh(source_path: &Path, cache_path: &Path) -> bool {
+    let Ok(cache_meta) = std::fs::metadata(cache_path) else {
+        return false;
+    };
+    if !cache_meta.is_file() || cache_meta.len() == 0 {
+        return false;
+    }
+    let Ok(src_meta) = std::fs::metadata(source_path) else {
+        return false;
+    };
+    match (src_meta.modified(), cache_meta.modified()) {
+        (Ok(src_mtime), Ok(cache_mtime)) => cache_mtime >= src_mtime,
+        _ => true,
+    }
+}
+
+fn handle_app_icon_request(
+    webview_label: &str,
+    rel_path: &str,
+    mounts: &PluginMountRegistry,
+) -> ProtocolReply {
+    if webview_label != "main" && webview_label != "dsh" {
+        return ProtocolReply::text(
+            403,
+            "forbidden (403): __app_icon__ is restricted to host webviews",
+        );
+    }
+
+    let Some(icon_id) = parse_valid_icon_id_filename(rel_path) else {
+        return ProtocolReply::text(403, "forbidden (403): invalid __app_icon__ path");
+    };
+
+    let Some(source_path) = mounts.get_icon_source(icon_id) else {
+        return ProtocolReply::text(403, "forbidden (403): unregistered app icon id");
+    };
+
+    let _span = info_span!("app_icon_asset", icon_id = %icon_id).entered();
+    let cache_dir = mounts
+        .icon_cache_dir()
+        .unwrap_or_else(|| std::env::temp_dir().join("aitools-icon-cache"));
+    let cache_path = cache_dir.join(format!("{icon_id}.png"));
+
+    if !is_cached_icon_fresh(&source_path, &cache_path) {
+        if let Err(err) = render_app_icon_png_128(&source_path, &cache_path) {
+            return ProtocolReply::text(404, &format!("unable to render icon: {err}"));
+        }
+    }
+
+    match std::fs::read(&cache_path) {
+        Ok(bytes) => ProtocolReply {
+            status: 200,
+            content_type: "image/png",
+            body: bytes,
+        },
+        Err(_) => ProtocolReply::text(404, "unable to read cached icon"),
+    }
+}
+
+/// Serves `aitools-plugin://<plugin_id>/<asset_path>` (and host-only `aitools-plugin://__app_icon__/<id>.png`)
+/// with `INV-SEC-01` & `SPEC-006-R3` canonicalization.
 pub fn handle_plugin_asset_request(
     webview_label: &str,
     raw_uri: &str,
@@ -114,6 +240,10 @@ pub fn handle_plugin_asset_request(
     else {
         return ProtocolReply::text(400, "invalid aitools-plugin URI");
     };
+
+    if plugin_id == APP_ICON_HOST {
+        return handle_app_icon_request(webview_label, &rel_path, mounts);
+    }
 
     if let Err(err) = validate_sync_caller(webview_label, &plugin_id) {
         return ProtocolReply::text(403, &err.to_string());
@@ -212,10 +342,6 @@ pub fn handle_sync_request_with_session(
 }
 
 /// Serves `aitools-sync://<plugin_id>/<op>` directly from `heed` LMDB (`INV-SEC-01`, `SPEC-002-R4`).
-///
-/// # Panics
-///
-/// Panics if the `faults` mutex is poisoned.
 pub fn handle_sync_request(
     webview_label: &str,
     raw_uri: &str,
@@ -255,12 +381,10 @@ pub fn handle_sync_request(
     let _span =
         info_span!("db_sync", trace_id = %trace_id, plugin_id = %plugin_id, op = %op).entered();
 
-    if faults
+    let inject_conflict = faults
         .lock()
-        .expect("fault injection lock poisoned")
-        .inject_lmdb_rev_conflict
-        && op == "db/put"
-    {
+        .is_ok_and(|guard| guard.inject_lmdb_rev_conflict);
+    if inject_conflict && op == "db/put" {
         return ProtocolReply::json(
             200,
             &json!({

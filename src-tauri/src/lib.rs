@@ -1,7 +1,7 @@
 //! `aitools-desktop` — Tauri v2 host shell (`SPEC-001`, `SPEC-006`, `SPEC-014`, `SPEC-016`).
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use aitools_ai::context_fusion::{suggest_zero_query_actions, ContextEnvelope, QuickAgentAction};
@@ -22,6 +22,64 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 use tracing::info_span;
 
 static WAKE_SEQ: AtomicU64 = AtomicU64::new(0);
+static INITIAL_WAKE_POSITIONED: AtomicBool = AtomicBool::new(false);
+
+/// Canonical main launcher window width in logical DIP (`SPEC-017-R1`).
+pub const MAIN_WINDOW_WIDTH: f64 = 800.0;
+/// Compact idle main launcher window height in logical DIP (`SPEC-017-R1`).
+pub const MAIN_WINDOW_MIN_HEIGHT: f64 = 58.0;
+/// Maximum expanded main launcher window height in logical DIP (`SPEC-017-R1`).
+pub const MAIN_WINDOW_MAX_HEIGHT: f64 = 594.0;
+
+/// Clamps requested main launcher logical height to `58.0..=594.0` (`SPEC-016-R3`, `SPEC-017-R1`).
+#[must_use]
+pub fn clamp_main_window_height(height: f64) -> f64 {
+    if height.is_finite() {
+        height.clamp(MAIN_WINDOW_MIN_HEIGHT, MAIN_WINDOW_MAX_HEIGHT)
+    } else {
+        MAIN_WINDOW_MIN_HEIGHT
+    }
+}
+
+/// Computes the initial wake top-left physical `(x, y)` coordinate centered horizontally and
+/// positioned ~`18%` down the active monitor height (`SPEC-016-R3`).
+#[must_use]
+pub fn compute_wake_window_origin(
+    mon_x: i32,
+    mon_y: i32,
+    mon_w: u32,
+    mon_h: u32,
+    scale_factor: f64,
+) -> (i32, i32) {
+    let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    let win_w_phys = (MAIN_WINDOW_WIDTH * scale).round() as i32;
+    let mon_w_i32 = i32::try_from(mon_w).unwrap_or(i32::MAX);
+    let x = mon_x + ((mon_w_i32 - win_w_phys) / 2).max(0);
+    let y_offset = (f64::from(mon_h) * 0.18).round() as i32;
+    let y = mon_y + y_offset.max(0);
+    (x, y)
+}
+
+fn position_main_window_for_wake<R: Runtime>(win: &tauri::WebviewWindow<R>) {
+    let monitor = win
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| win.primary_monitor().ok().flatten());
+    if let Some(mon) = monitor {
+        let pos = mon.position();
+        let size = mon.size();
+        let scale = mon.scale_factor();
+        let (x, y) = compute_wake_window_origin(pos.x, pos.y, size.width, size.height, scale);
+        let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+            x, y,
+        )));
+    }
+}
 
 /// Payload streamed to the frontend over `tauri::ipc::Channel` on global wake (`SPEC-006-R4`).
 #[derive(Debug, Clone, Serialize)]
@@ -86,6 +144,28 @@ fn set_focus_hide_suppressed<R: Runtime>(
 ) -> Result<(), String> {
     ensure_host_webview(webview.label())?;
     state.set_focus_hide_suppressed(suppressed);
+    Ok(())
+}
+
+#[tauri::command]
+fn resize_main_window<R: Runtime>(
+    height: f64,
+    app: AppHandle<R>,
+    webview: tauri::Webview<R>,
+) -> Result<(), String> {
+    ensure_host_webview(webview.label())?;
+    let clamped = clamp_main_window_height(height);
+    if let Some(win) = app.get_webview_window("main") {
+        let anchor_pos = win.outer_position().ok();
+        win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+            MAIN_WINDOW_WIDTH,
+            clamped,
+        )))
+        .map_err(|e| e.to_string())?;
+        if let Some(pos) = anchor_pos {
+            let _ = win.set_position(pos);
+        }
+    }
     Ok(())
 }
 
@@ -186,6 +266,9 @@ fn handle_wake_hotkey<R: Runtime>(app: &AppHandle<R>) {
     let (payload, _env) = capture_wake_context(&trace_id, &clipboard, state_ref.as_deref());
 
     if let Some(win) = app.get_webview_window("main") {
+        if !INITIAL_WAKE_POSITIONED.swap(true, Ordering::Relaxed) {
+            position_main_window_for_wake(&win);
+        }
         let _ = win.show();
         let _ = win.set_focus();
     }
@@ -302,17 +385,20 @@ pub fn run() -> anyhow::Result<()> {
             register_wake_channel,
             hide_main_window,
             set_focus_hide_suppressed,
+            resize_main_window,
         ])
         .setup(move |app| {
-            // SPEC-016-R1: persist logs & LMDB under platform `app_data_dir()` instead of temp_dir.
+            // SPEC-016-R1: persist logs, LMDB, and icon cache under platform `app_data_dir()` instead of temp_dir.
             let app_data = app
                 .path()
                 .app_data_dir()
                 .context("failed to resolve platform app_data_dir")?;
             let log_dir = app_data.join("logs");
             let db_dir = app_data.join("lmdb");
+            let icon_cache_dir = app_data.join("icon-cache");
             std::fs::create_dir_all(&log_dir)?;
             std::fs::create_dir_all(&db_dir)?;
+            std::fs::create_dir_all(&icon_cache_dir)?;
 
             // SPEC-000: initialize aitools-telemetry first.
             let telemetry: Option<std::sync::Arc<TelemetryHandle>> =
@@ -323,6 +409,7 @@ pub fn run() -> anyhow::Result<()> {
             let state = AitoolsState::open(&db_dir, telemetry, &[]).with_context(|| {
                 format!("failed to initialize AitoolsState at {}", db_dir.display())
             })?;
+            state.mounts.set_icon_cache_dir(&icon_cache_dir);
             state.attach_app_handle(app.handle().clone());
 
             let resource_dir = app.path().resource_dir().ok();
@@ -465,12 +552,31 @@ mod tests {
         assert!(tauri_plugin_aitools::ensure_host_webview("plugin-todo")
             .unwrap_err()
             .contains("403"));
-        for forbidden_new in ["search-list-mode", "select-list-item", "dsh-preload-status"] {
+        for forbidden_new in [
+            "search-list-mode",
+            "select-list-item",
+            "dsh-preload-status",
+            "featured-home-items",
+            "featured_home_items",
+            "resize_main_window",
+        ] {
             assert!(
                 !guest_toml.contains(forbidden_new),
                 "guest-sandbox.toml must not grant {forbidden_new}"
             );
         }
+    }
+
+    #[test]
+    fn spec_016_r3_resize_clamp_and_wake_origin_positioning() {
+        assert!((super::clamp_main_window_height(10.0) - 58.0).abs() < f64::EPSILON);
+        assert!((super::clamp_main_window_height(320.0) - 320.0).abs() < f64::EPSILON);
+        assert!((super::clamp_main_window_height(999.0) - 594.0).abs() < f64::EPSILON);
+        assert!((super::clamp_main_window_height(f64::NAN) - 58.0).abs() < f64::EPSILON);
+
+        let (x, y) = super::compute_wake_window_origin(0, 0, 3456, 2234, 2.0);
+        assert_eq!(x, 928);
+        assert_eq!(y, 402);
     }
 
     #[test]
@@ -544,6 +650,7 @@ mod tests {
             serde_json::from_str(include_str!("../capabilities/main-shell.json")).unwrap();
         let app_svelte = include_str!("../../packages/renderer-svelte/src/App.svelte");
         let ipc_ts = include_str!("../../packages/renderer-svelte/src/lib/ipc.ts");
+        let global_css = include_str!("../../packages/renderer-svelte/src/styles/global.css");
 
         assert_eq!(conf["app"]["macOSPrivateApi"], serde_json::json!(true));
         let windows = conf["app"]["windows"].as_array().unwrap();
@@ -553,8 +660,8 @@ mod tests {
             "startup must instantiate only the single main WebView; dsh is constructed lazily"
         );
         let main_win = windows.iter().find(|w| w["label"] == "main").unwrap();
-        assert_eq!(main_win["width"], serde_json::json!(780));
-        assert_eq!(main_win["height"], serde_json::json!(62));
+        assert_eq!(main_win["width"], serde_json::json!(800));
+        assert_eq!(main_win["height"], serde_json::json!(58));
         assert_eq!(main_win["transparent"], serde_json::json!(true));
         assert_eq!(main_win["decorations"], serde_json::json!(false));
         assert!(
@@ -576,11 +683,14 @@ mod tests {
         assert!(perms.contains(&serde_json::json!("core:window:allow-start-dragging")));
 
         assert!(ipc_ts.contains("window.location.hash === \"#dsh\""));
-        assert!(ipc_ts.contains("new LogicalSize(780, clamped)"));
-        assert!(app_svelte.contains("height: 62px;"));
+        assert!(ipc_ts.contains("resize_main_window"));
+        assert!(ipc_ts.contains("new LogicalSize(800, clamped)"));
+        assert!(global_css.contains("background: transparent !important;"));
+        assert!(app_svelte.contains("height: 58px;"));
+        assert!(app_svelte.contains("max-height: 536px;"));
+        assert!(!app_svelte.contains("max-height: 100vh;"));
         assert!(app_svelte.contains("data-tauri-drag-region"));
         assert!(app_svelte.contains("backdrop-filter: blur("));
-        assert!(app_svelte.contains("min-height: 0;"));
         assert!(app_svelte.contains("overflow-y: auto;"));
         assert!(app_svelte.contains("<DshPanel"));
     }
@@ -658,9 +768,12 @@ mod tests {
         let store_ts = include_str!("../../packages/renderer-svelte/src/stores/launcher.svelte.ts");
         let app_svelte = include_str!("../../packages/renderer-svelte/src/App.svelte");
         assert!(ipc_ts.contains("kind: \"list_mode\""));
+        assert!(ipc_ts.contains("plugin:aitools|featured_home_items"));
         assert!(ipc_ts.contains("plugin:aitools|search_list_mode"));
         assert!(ipc_ts.contains("plugin:aitools|select_list_item"));
         assert!(store_ts.contains("hitl_suspended"));
+        assert!(app_svelte.contains("class=\"app-grid\""));
+        assert!(app_svelte.contains("<mark class=\"highlight\">"));
         assert!(app_svelte.contains("{#if !tier2}"));
         assert!(app_svelte.contains("Approve Session"));
     }
@@ -712,22 +825,27 @@ mod tests {
             );
         }
 
-        // Light semantic colors on light bg (`#ebeef2` / `#ffffff`) and dark colors on dark bg (`#2c3340` / `#161a21`).
+        // Light semantic colors on light translucent shell (`#f4f4f4` / `#e8eaed`) and dark colors on dark translucent shell (`#303133` / `#383a3e`).
         for (fg, bg) in [
-            ("#1f2328", "#ebeef2"),
-            ("#47505c", "#ebeef2"),
-            ("#57606a", "#ebeef2"),
-            ("#5b21b6", "#ebeef2"),
-            ("#b42318", "#ebeef2"),
-            ("#0d684b", "#ebeef2"),
-            ("#854d0e", "#ebeef2"),
-            ("#f0f3f6", "#2c3340"),
-            ("#bcc5d1", "#2c3340"),
-            ("#98a3b3", "#2c3340"),
-            ("#c4b5fd", "#2c3340"),
-            ("#ffa3a3", "#2c3340"),
-            ("#5cd49b", "#2c3340"),
-            ("#f0b959", "#2c3340"),
+            ("#1f2328", "#f4f4f4"),
+            ("#47505c", "#f4f4f4"),
+            ("#525963", "#f4f4f4"),
+            ("#047857", "#f4f4f4"),
+            ("#065f46", "#f4f4f4"),
+            ("#c2410c", "#f4f4f4"),
+            ("#9a3412", "#f4f4f4"),
+            ("#b42318", "#f4f4f4"),
+            ("#854d0e", "#f4f4f4"),
+            ("#f3f4f6", "#303133"),
+            ("#c6cbd2", "#303133"),
+            ("#aeb5bf", "#303133"),
+            ("#34d399", "#303133"),
+            ("#6ee7b7", "#303133"),
+            ("#fb923c", "#303133"),
+            ("#fdba74", "#303133"),
+            ("#fecaca", "#303133"),
+            ("#fbbf24", "#383a3e"),
+            ("#052e16", "#34d399"),
         ] {
             assert!(
                 global_css.contains(fg),
@@ -741,7 +859,7 @@ mod tests {
         }
 
         assert!(mark_svelte.contains("--mark-size: 20px;"));
-        assert!(mark_svelte.contains("--mark-size: 32px;"));
+        assert!(mark_svelte.contains("--mark-size: 36px;"));
         assert!(mark_svelte.contains("--mark-size: 72px;"));
         assert!(dsh_svelte.contains("overflow-x: auto;"));
         assert!(dsh_svelte.contains("min-height: 0;"));

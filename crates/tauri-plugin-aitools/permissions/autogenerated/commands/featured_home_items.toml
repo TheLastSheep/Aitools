@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-featured-home-items"
+description = "Enables the featured_home_items command without any pre-configured scope."
+commands.allow = ["featured_home_items"]
+
+[[permission]]
+identifier = "deny-featured-home-items"
+description = "Denies the featured_home_items command without any pre-configured scope."
+commands.deny = ["featured_home_items"]
