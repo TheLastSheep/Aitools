@@ -1,0 +1,75 @@
+# SPEC-016: Desktop Host Runtime Wiring, Capability Split & Real AI Execution
+
+- **Status:** Active
+- **Version:** 1.1.0
+- **Owner Crates:** `crates/aitools-core`, `crates/aitools-native`, `crates/aitools-ai`, `crates/tauri-plugin-aitools`, `crates/aitools-cli`, `src-tauri`
+- **Extends / Supersedes:** `SPEC-001` (Native Hooks), `SPEC-002` (Storage), `SPEC-006` (Desktop Shell & Capabilities — `SPEC-016-R4` tightens `SPEC-006-R2` guest permissions), `SPEC-007` (AI Platform), `SPEC-011` (Agent Orchestration), `SPEC-015` (3-Tier Preload Runtime)
+
+## 1. Persistent AppData Storage & Startup Indexing
+
+- **SPEC-016-R1 (Persistent AppData LMDB & Full Startup Indexing):** `src-tauri` MUST open `StorageEngine` (`heed` LMDB) and chronological telemetry under the OS-native persistent `app.path().app_data_dir()` (NEVER `std::env::temp_dir()`). On startup, `src-tauri` MUST populate `FeatureSearchIndex`, `PluginMountRegistry`, and `ToolRegistry` from:
+  1. Installed OS applications via `aitools_native::app_catalog::AppCatalog` (`.app` / `.desktop` / `.lnk` / `.exe`, resolving localized/display names and app icons where available);
+  2. Bundled built-in plugins under `plugins/builtin/*` (resolving both packaged Tauri bundle resources and dev workspace paths cleanly);
+  3. Installed / synced ZTools plugin directories (including `<home>/.aitools/plugins/ztools` and paths registered via `sync_ztools_dir`) in strict read-only compliance with `INV-ZTOOLS-IMMUTABLE` (`SPEC-015-R1`).
+  - Manifest indexing MUST synthesize searchable `FeatureEntry` items for both v1 `plugin.json` `features[]` and v2 `aitools.manifest.json` manifests (using explicit `features[]` or deriving a default entry from `id`, `name`, `description`, and `ai_tools`).
+  - `search_features` MUST return enriched `LauncherHit` items (`feature_code`, `plugin_id`, `label`, `plugin_name`, `description`, `icon`, `kind`, `score`, `match_type`, `confidence`, `explain`) and execute `FeatureSearchIndex` text/Pinyin/regex/`over` matching plus typed `files` / `img` clipboard rules when active context carries file paths or image payloads (`SPEC-005-R4`).
+
+## 2. Canonical Execution Pipeline, 3-Tier Preload Sessions & Window Focus Guard
+
+- **SPEC-016-R2 (Canonical 5-Kind Execution Dispatch & `PreloadRuntime` Session Wiring):** `tauri-plugin-aitools` MUST expose canonical host commands matching `packages/renderer-svelte` (`SPEC-017`):
+  - `launch_item(feature_code, plugin_id, query, kind?, trace_id?, on_list_event)` MUST return a tagged `LaunchResult` (`opened_window`, `launched_app`, `list_mode`, `executed_headless`, `wasm_result`, `macro_started`) across all 5 item kinds:
+    1. `app`: launches the native desktop application (`NSWorkspace` / `open` on macOS, `xdg-open`/spawn on Linux, `ShellExecute` on Windows) -> `launched_app`;
+    2. `plugin` (UI): ensures `PluginMountRegistry` root registration, opens or focuses `plugin-<id>` via `build_plugin_window` (`INV-SEC-02`), activates `PreloadRuntime` when `"preload"` is present (injecting exported `window.*` proxies via `build_initialization_script_with_preload_props`), and dispatches `onPluginEnter` + `aitools:context-enter` (`ContextEnvelope`) -> `opened_window`;
+    3. `list` / headless (`mode: "list" | "none" | "doc"`): acquires or initializes a `PluginSessionManager` session backed by `aitools_js_bridge::PreloadRuntime` (`SPEC-015-R2`), defaults to `PreloadExecutionMode::RustFirstWithFallback` (or `PreloadExecutionMode::PureRustOnly` when `AITOOLS_PURE_RUST_PRELOAD=1` / host config is set), derives `PreloadCapabilities { allow_fs, allow_net, allow_child_process }` strictly from the plugin manifest & trust tier, executes `enter`, streams initial `ListItem[]` over `Channel<ListPushEvent>`, and returns `list_mode` (or `executed_headless` for `none`);
+    4. `wasm`: instantiates and invokes the Tier 3 `rust-wasm` module via `WasmPluginHost` (`SPEC-008-R3`, `SPEC-012-R3`) with zero child WebView -> `wasm_result`;
+    5. `macro`: resolves and executes a saved `WorkflowMacro` DAG (`SPEC-011-R7`) through `PolicyGuard` -> `macro_started`.
+  - `search_list_mode(session_id, plugin_id, feature_code, query, trace_id?, on_list_event)` MUST forward `SubInput` / launcher search updates to the active `PluginSessionManager` session and return `{ session_id, items }` while streaming `ListPushEvent` updates.
+  - `select_list_item(session_id, plugin_id, feature_code, item, index, trace_id?)` MUST invoke `args.select` on the active preload session and return `{ ok, out_plugin?, hide_main?, message?, items? }`.
+  - `sync_ztools_dir(dir_path?)` MUST scan `dir_path` (defaulting to `<home>/.aitools/plugins/ztools`) read-only (`INV-ZTOOLS-IMMUTABLE`), persist plugin records in LMDB, register mounts/features in `PluginMountRegistry` and `FeatureSearchIndex`, and return `{ dir, indexed_plugins, indexed_features, errors }`.
+
+- **SPEC-016-R3 (Real Wake Context, Tray Menu & `Focused(false)` Auto-Hide Guard):**
+  - On global hotkey wake (`Alt+Space` and configurable `DoubleTapDetector`), `src-tauri` MUST capture real `PreFocusContext` (`app_name`, `bundle_id`, `window_title`, `selected_text` via Accessibility/AX or non-destructive fallback, `clipboard_preview`, `active_path`, `captured_at_ms`), assemble `ContextEnvelope`, and stream `WakePayload` over `tauri::ipc::Channel` before showing `main`.
+  - `src-tauri` MUST register a system tray icon (`tray-icon`) providing **Show Launcher**, **Developer Harness (DSH)**, and **Quit** actions so the app remains reachable even if global hotkey registration fails.
+  - `WindowEvent::Focused(false)` on `main` MUST hide the launcher window ONLY when no active HITL confirmation, window drag, or modal guard is active (`!focus_hide_suppressed`), preventing mid-approval dismissal.
+
+## 3. Capability Splitting, Network Gating & `NodeCompatGap` Observability (`INV-SEC-01`, `INV-SEC-02`)
+
+- **SPEC-016-R4 (Guest Sandbox Capability Split, `webview.label()` Guards, `http_op` & `PreloadTier` Telemetry):**
+  1. **Least-Privilege `aitools:guest-sandbox` Permission (Supersedes `SPEC-006-R2` temporary `"aitools:default"` grant):** `crates/tauri-plugin-aitools/permissions/guest-sandbox.toml` (`identifier = "guest-sandbox"`) MUST authorize ONLY the 7 guest-scoped SDK commands: `db_get`, `db_put`, `db_remove`, `db_all_docs`, `ai_chat`, `ai_embed`, and `telemetry_log`.
+  2. `src-tauri/capabilities/plugin-sandbox.json` (`"webviews": ["plugin-*"]`) MUST grant `"aitools:guest-sandbox"` (plus minimal `dialog:default`, `notification:default`, `opener:default`, and safe window/event scopes) and MUST NOT grant `"aitools:default"`.
+  3. **Explicit `webview.label()` Guard on Every Privileged Host Command:** Every host-only command (`dsh_recent_logs`, `dsh_ingest_frontend_log`, `dsh_set_fault_injection`, `run_agent_dag`, `resolve_hitl_step`, `submit_agent_prompt`, `launch_item`, `search_list_mode`, `select_list_item`, `sync_ztools_dir`, `invoke_legacy_list_feature`, `zero_query_suggestions`, `search_features`) MUST inspect `webview.label()` and reject any caller where `label.starts_with("plugin-")` with an explicit `forbidden (403)` error.
+  4. **Manifest Permission Enforcement on `aitools-sync://` & `HostBridgeHandler::http_op`:**
+     - `handle_sync_request` MUST verify `validate_sync_caller(webview_label, plugin_id)` (`INV-SEC-01`) AND enforce declared manifest `permissions` on sensitive domains (`clipboard.*`, `shell.*`, `db.*`, `ai.*`, `system.*`, `net.*`) for v2 manifests while preserving scoped ZTools compatibility defaults for v1 `plugin.json` manifests (never granting DSH or host agent privileges).
+     - `HostBridgeHandler::http_op` MUST execute outbound HTTP/HTTPS requests in `crates/tauri-plugin-aitools` using `reqwest` (`rustls-tls`), strictly enforce `PreloadCapabilities::allow_net` / manifest network permissions, and emit `aitools-telemetry` tracing spans (`trace_id`, `plugin_id`).
+  5. **`PreloadTier` & `node_compat_gap` Observability:** Active `PreloadTier` (`WebViewOnly` | `QuickJsNodeCompat` | `SystemNodeFallback`) per plugin and `aitools::node_compat_gap` counters MUST be exposed in DSH runtime state (`crates/tauri-plugin-aitools`) and aggregated by `aitools doctor` (`crates/aitools-cli`) so Node.js compatibility gaps are tracked until burned down to zero.
+
+## 4. Schema Reconciliation, Keychain AI Broker & Streaming Agent DAG
+
+- **SPEC-016-R5 (`Document` Envelope/Flat Reconciliation & `ContextEnvelope` Alignment):**
+  - `aitools_core::Document` MUST seamlessly accept, persist, and serialize both flat PouchDB/ZTools documents (`{ "_id": "...", "_rev": "...", ...fields }`) and `{ "_id": "...", "_rev": "...", "data": { ... } }` envelope documents across `StorageEngine`, Tauri IPC (`db_*`), and `aitools-sync://` without dropping fields.
+  - `aitools_ai::ContextEnvelope` and `@aitools/sdk`'s `ContextEnvelope` MUST share one aligned canonical schema covering `trace_id`, `app_name`, `bundle_id`, `window_title`, `selected_text`, `clipboard_preview`, `active_path`, `image_handle`, `captured_at_ms`, and `signature` (with backwards-compatible serde aliases where needed).
+
+- **SPEC-016-R6 (Keychain HTTPS/SSE AI Broker & Real `submit_agent_prompt` DAG):**
+  - `ModelBroker` MUST support named profiles `"fast"`, `"balanced"` (retaining `"reasoning"` alias compatibility for `SPEC-007`), `"deep"`, and `"embedding"`, resolving API keys solely from `aitools-native` `SecretStore` (`KeyringSecretStore`, `INV-SEC-03`).
+  - `ai_chat` and `ai_embed` MUST execute real `reqwest` HTTPS/SSE requests for configured OpenAI-compatible and Anthropic providers (`parse_openai_sse_line` parsing `delta` tokens/tool calls prior to `finish_reason` so final deltas are never dropped), falling back cleanly to a clearly tagged deterministic `OfflineMock` response when no provider credential is configured.
+  - `submit_agent_prompt(prompt, trace_id, chips, profile?, on_event)` MUST plan and execute multi-tool DAGs over live `ToolRegistry` providers (OS tools, built-in plugins, Wasm tools, legacy tools), sanitize untrusted ambient content (`PromptSanitizer` / `DangerousCommandGuard`), enforce `PolicyGuard` (`INV-SEC-04`, strictly requiring per-invocation explicit approval for `Tier2DestructiveOrExternal`), stream `AgentStreamEvent` variants (`token`, `thinking`, `node_started`, `hitl_suspended`, `node_completed`, `node_failed`, `completed`, `error`) over `tauri::ipc::Channel`, and return `{ trace_id, final_text, completed_nodes? }`.
+
+## 5. Clause-to-Test Traceability
+
+| Clause | Requirement Summary | Linked Test (`crates/*/src/` or `crates/*/tests/`) | Owner Crate |
+| :--- | :--- | :--- | :--- |
+| `SPEC-016-R1` | Persistent AppData LMDB, `AppCatalog`, macOS `Info.plist` aliases/bundle ID, bundled `plugins/builtin/*` & ZTools indexing | `spec_016_r1_appdata_lmdb_persists_and_indexes_apps_and_plugins`, `spec_016_r1_reads_macos_info_plist_aliases_and_bundle_id` | `src-tauri`, `aitools-native` |
+| `SPEC-016-R2` | `launch_item`, `search_list_mode`, `select_list_item`, `sync_ztools_dir` & 3-tier `PreloadRuntime` session wiring | `spec_016_r2_launch_item_and_list_mode_dispatch_all_five_kinds` | `tauri-plugin-aitools` |
+| `SPEC-016-R3` | Real `PreFocusContext`, clipboard media helpers, tray menu & `Focused(false)` HITL/drag hide guard | `spec_016_r3_pre_focus_context_tray_and_focus_hide_guard`, `spec_016_r3_live_context_and_clipboard_media_helpers` | `src-tauri`, `aitools-native` |
+| `SPEC-016-R4` | `aitools:guest-sandbox` ACL split, `webview.label()` guard, `http_op` gating & `PreloadTier`/`node_compat_gap` telemetry | `spec_016_r4_guest_sandbox_blocks_privileged_commands_and_enforces_labels` | `src-tauri`, `tauri-plugin-aitools`, `aitools-cli` |
+| `SPEC-016-R5` | `Document` flat/envelope reconciliation & Rust <-> `@aitools/sdk` `ContextEnvelope` alignment | `spec_016_r5_document_flat_and_envelope_reconcile`, `spec_016_r5_context_envelope_aligns_with_sdk_and_legacy_aliases` | `aitools-core`, `aitools-ai` |
+| `SPEC-016-R6` | Keychain HTTPS/SSE AI broker (`fast`/`balanced`/`deep` + offline fallback) & `submit_agent_prompt` DAG + Tier-2 HITL | `spec_016_r6_broker_streams_live_sse_and_falls_back_when_unconfigured`, `spec_016_r6_agent_prompt_enforces_tier2_per_call_and_streams_events` | `aitools-ai` |
+
+## 6. Implementation & Verification Status
+
+- **Status:** Verified (Desktop wiring, sandboxed capability split, `Document`/SDK alignment, AI SSE broker, and HITL DAG executor implemented and verified)
+- **Verified By Wave 3 (`@verifier`, 2026-11-18):**
+  - All `SPEC-016-R1` through `SPEC-016-R6` linked tests passed in `cargo test --workspace` (81/81 passed, 0 failed, 0 ignored: `aitools-desktop-lib`: 8/8; `tauri-plugin-aitools`: 9/9; `aitools-ai`: 13/13; `aitools-core`: 8/8 + 4/4; `aitools-native`: 8/8).
+  - Verified `src-tauri/capabilities/plugin-sandbox.json` restricts guest webviews to `aitools:guest-sandbox`, `ensure_host_webview` enforces `webview.label()`, and IPC commands/payloads align across `tauri-plugin-aitools`, `packages/aitools-sdk`, and `packages/renderer-svelte`.
+  - `pnpm --filter @aitools/sdk typecheck && pnpm --filter @aitools/sdk build` -> exit 0 (`tsc --noEmit`).
+  - `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` -> exit 0.

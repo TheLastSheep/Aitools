@@ -18,10 +18,11 @@
 
 - **SPEC-006-R5 (Unified Dual-Mode & DSH Shell):** `packages/renderer-svelte` MUST route keystrokes to `aitools-core` hybrid search (< 5 ms), promote to `aitools-ai` Agent mode on `Tab` or `@` with removable context chips, and toggle the embedded DSH diagnostic drawer on `Cmd+Shift+D`.
 
-## 4. Implementation & Verification Status (Updated 2026-11-16)
+## 4. Implementation & Verification Status (Updated 2026-11-18)
 
-- **Status:** Implemented across `crates/tauri-plugin-aitools`, `src-tauri`, and `packages/renderer-svelte`:
-  - `SPEC-006-R1` & `SPEC-006-R2`: Least-privilege capability split in `src-tauri/capabilities/main-shell.json` & `plugin-sandbox.json` — verified by `spec_006_r1_and_r2_capabilities_isolate_plugins` (`src-tauri/src/lib.rs`).
+- **Status:** Implemented and Wave 3 verified across `crates/tauri-plugin-aitools`, `src-tauri`, and `packages/renderer-svelte`:
+  - `SPEC-006-R1` & `SPEC-006-R2`: Least-privilege capability split in `src-tauri/capabilities/main-shell.json` (`allow-set-size`, `allow-start-dragging`, `aitools:default`) & `plugin-sandbox.json` (`aitools:guest-sandbox`, 7 guest commands) plus `ensure_host_webview` label checks — verified by `spec_006_r1_and_r2_capabilities_isolate_plugins` and `spec_016_r4_guest_sandbox_blocks_privileged_commands_and_enforces_labels` (`src-tauri/src/lib.rs`).
   - `SPEC-006-R3`: `handle_plugin_asset_request` with `validate_sync_caller` + `std::fs::canonicalize` — verified by `inv_sec_01_blocks_cross_plugin_and_path_traversal` (`crates/tauri-plugin-aitools/src/lib.rs`).
-  - `SPEC-006-R4`: Global wake hotkey (`Alt+Space`) synchronously captures `PreFocusContext` and streams `WakePayload` via `tauri::ipc::Channel` (`register_wake_channel`).
-  - `SPEC-006-R5`: `packages/renderer-svelte` (`App.svelte`, `DshPanel.svelte`, `stores/launcher.svelte.ts`) verified cleanly with `svelte-check` (0 errors, 0 warnings) and `vite build`.
+  - `SPEC-006-R4`: Global wake hotkey (`Alt+Space`) synchronously captures `PreFocusContext` and streams `WakePayload` via `tauri::ipc::Channel` (`register_wake_channel`), with tray menu and `Focused(false)` HITL/drag hide guard (`spec_016_r3_pre_focus_context_tray_and_focus_hide_guard`).
+  - `SPEC-006-R5`: `packages/renderer-svelte` (`App.svelte`, `DshPanel.svelte`, `AToolsMark.svelte`, `stores/launcher.svelte.ts`, `lib/ipc.ts`) verified by `svelte-check` (0 errors, 0 warnings), `vite build`, and `spec_017_r1`–`spec_017_r4` (`src-tauri/src/lib.rs`).
+- **Verified By Wave 3 (`@verifier`, 2026-11-18):** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`, `cargo test --workspace` (81/81 passed, 0 failed, 0 ignored), and `pnpm --filter @aitools/renderer-svelte check && build` all exited 0.

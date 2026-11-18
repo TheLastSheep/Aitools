@@ -40,3 +40,6 @@
 - `SPEC-012` — Cross-tier plugin synthesis, `@aitools/sdk` & `aitools plugin migrate`
 - `SPEC-013` — Bidirectional MCP gateway, lazy `SKILL.md` injection & DSH fault injector
 - `SPEC-014` — End-to-end `trace_id` propagation, `aitools doctor` profiling & `import-diag` loop
+- `SPEC-015` — ZTools zero-modification runtime (`INV-ZTOOLS-IMMUTABLE`), 3-tier Rust-first QuickJS Node-compat & `SystemNodeFallback` preload, and `aitools-sync://` parity
+- `SPEC-016` — Desktop host wiring, `aitools:guest-sandbox` capability split, Keychain HTTPS/SSE AI broker & streaming agent DAG
+- `SPEC-017` — Production Svelte launcher UI/UX, WCAG 2.2 AA theme tokens, CJK IME guard & CSP-compliant built-in plugins
