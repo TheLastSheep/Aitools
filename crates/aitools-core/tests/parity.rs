@@ -211,15 +211,80 @@ fn spec_015_r1_loads_unmodified_ztools_plugin_dir() {
     ];
     assert_eq!(before, after);
 
-    // If sibling ZTools-plugins repository exists on this host, verify all manifests parse read-only.
-    let ztools_repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../ZTools-plugins/plugins");
-    if ztools_repo.is_dir() {
-        let real_plugins = scan_plugins_dir(&ztools_repo).unwrap();
+    // Verify real unmodified ZTools plugins from host fixture sources without silent skips:
+    // 1) ~/.aitools/plugins/ztools (active ZTools plugin dir)
+    // 2) ~/Desktop/ZTools-plugins/plugins (or AITOOLS_ZTOOLS_PLUGINS_DIR)
+    // 3) ~/.aitools/atools-legacy-source-backup.tar.gz (read-only extraction into TempDir)
+    let home_dir = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from);
+    let user_ztools_dir = home_dir
+        .as_ref()
+        .map(|h| h.join(".aitools").join("plugins").join("ztools"));
+    let desktop_ztools_dir = std::env::var_os("AITOOLS_ZTOOLS_PLUGINS_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            home_dir
+                .as_ref()
+                .map(|h| h.join("Desktop").join("ZTools-plugins").join("plugins"))
+        });
+    let legacy_tarball = home_dir.as_ref().map(|h| {
+        h.join(".aitools")
+            .join("atools-legacy-source-backup.tar.gz")
+    });
+
+    let mut verified_any_corpus = false;
+
+    if let Some(zdir) = user_ztools_dir.as_ref().filter(|p| p.is_dir()) {
+        let installed_plugins = scan_plugins_dir(zdir).unwrap();
+        assert!(
+            !installed_plugins.is_empty(),
+            "expected non-empty ZTools plugins in {}, got 0",
+            zdir.display()
+        );
+        verified_any_corpus = true;
+    }
+
+    if let Some(full_dir) = desktop_ztools_dir.as_ref().filter(|p| p.is_dir()) {
+        let real_plugins = scan_plugins_dir(full_dir).unwrap();
         assert!(
             real_plugins.len() >= 100,
-            "expected >= 100 unmodified ZTools plugins to load cleanly, got {}",
+            "expected >= 100 unmodified ZTools plugins in {}, got {}",
+            full_dir.display(),
             real_plugins.len()
+        );
+        verified_any_corpus = true;
+    } else if let Some(tarball) = legacy_tarball.as_ref().filter(|p| p.is_file()) {
+        let extracted = TempDir::new().unwrap();
+        let status = std::process::Command::new("tar")
+            .arg("-xzf")
+            .arg(tarball)
+            .arg("--strip-components=3")
+            .arg("-C")
+            .arg(extracted.path())
+            .arg("atools/ZTools-plugins/plugins/*/plugin.json")
+            .status()
+            .expect("invoke tar to extract ZTools manifests");
+        assert!(
+            status.success(),
+            "failed extracting manifests from {}",
+            tarball.display()
+        );
+        let real_plugins = scan_plugins_dir(extracted.path()).unwrap();
+        assert!(
+            real_plugins.len() >= 100,
+            "expected >= 100 unmodified ZTools plugins in {}, got {}",
+            tarball.display(),
+            real_plugins.len()
+        );
+        verified_any_corpus = true;
+    }
+
+    if !verified_any_corpus {
+        eprintln!(
+            "SKIP [DIFFERENTIAL-TESTING.md]: no real ZTools plugin fixture source found on host \
+             (absent: {:?}, {:?}, {:?})",
+            user_ztools_dir, desktop_ztools_dir, legacy_tarball
         );
     }
 }
