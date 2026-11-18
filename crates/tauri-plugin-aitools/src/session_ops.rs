@@ -1,26 +1,42 @@
+use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use aitools_ai::broker::{ExecutionBackend, ModelProfileKind};
+use aitools_ai::launcher::LauncherHit;
 use aitools_core::{
     AttachmentRecord, Cmd, Document, Feature, LoadedPlugin, PluginDataQuery, PluginDataRemove,
-    PluginDataWriteResult, PluginRuntimeTier,
+    PluginDataWriteResult, PluginRuntimeTier, StorageEngine,
 };
 use aitools_js_bridge::{CallbackTable, ListItem, ListPushEvent, ListPushSink, PreloadLoadInfo};
 use aitools_native::app_catalog::launch_application;
 use aitools_native::context::{capture_frontmost_snapshot, CopiedFileEntry};
+use aitools_native::icon_analysis::{analyze_icon_data_url, analyze_icon_path};
 use aitools_wasm_host::{WasmInstanceHandle, WasmPluginHost};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tracing::info_span;
 
 use crate::session::{
-    block_on_async, now_unix_ms, ClipboardHistoryItem, KeychainApiKeyProvider, LaunchResult,
-    ListModeSession, ListSearchResponse, PluginSessionManager, SelectListResult, SyncOpError,
+    block_on_async, now_unix_ms, ClipboardHistoryItem, HomeSectionsResponse, HostLauncherState,
+    KeychainApiKeyProvider, LaunchResult, LauncherItemRef, LauncherStateMutation, ListModeSession,
+    ListSearchResponse, PluginSessionManager, SelectListResult, SyncOpError,
     DEFAULT_HTTP_TIMEOUT_SECS, MAX_CLIPBOARD_HISTORY,
 };
+
+const HOST_LAUNCHER_BUCKET: &str = "__host_launcher__";
+const DOC_RECENT_HISTORY: &str = "recent_history";
+const DOC_PINNED_ITEMS: &str = "pinned_items";
+const DOC_RECOMMENDATION_PINNED: &str = "recommendation_pinned";
+const DOC_USAGE_STATS: &str = "usage_stats";
+const DOC_REMOVED_RECENT_KEYS: &str = "removed_recent_keys";
+const MAX_RECENT_HISTORY: usize = 36;
+const MAX_ICON_ANALYSIS_CACHE: usize = 4096;
 
 impl PluginSessionManager {
     /// Handles `callbackSetList(items)` emitted by Tier-2/Tier-3 preload runtimes.
@@ -1239,6 +1255,12 @@ impl PluginSessionManager {
             launch_application(&target)
                 .map_err(|e| format!("failed to launch '{app_name}': {e}"))?;
             let _ = self.window_controller().hide_main_window();
+            let effective_plugin = if plugin_id.trim().is_empty() {
+                "system-apps"
+            } else {
+                plugin_id
+            };
+            self.record_successful_launch(effective_plugin, feature_code);
             return Ok(LaunchResult::LaunchedApp {
                 app_name,
                 hide_main: Some(true),
@@ -1247,6 +1269,7 @@ impl PluginSessionManager {
 
         // 2. Workflow Macro Launch
         if kind == Some("macro") || feature_code.starts_with("macro:") {
+            self.record_successful_launch(plugin_id, feature_code);
             return Ok(LaunchResult::MacroStarted {
                 macro_id: feature_code.trim_start_matches("macro:").to_string(),
                 trace_id: trace.to_string(),
@@ -1275,6 +1298,7 @@ impl PluginSessionManager {
             let wasm_path = plugin.root_dir.join(wasm_rel);
             let output =
                 execute_wasm_plugin(&self.wasm_host, plugin_id, feature_code, query, &wasm_path)?;
+            self.record_successful_launch(&plugin.id, feature_code);
             return Ok(LaunchResult::WasmResult {
                 plugin_id: plugin.id,
                 feature_code: feature_code.to_string(),
@@ -1307,6 +1331,7 @@ impl PluginSessionManager {
                         init_action: Some(action),
                     })?;
             let _ = self.window_controller().hide_main_window();
+            self.record_successful_launch(&plugin.id, feature_code);
             return Ok(LaunchResult::OpenedWindow {
                 plugin_id: plugin.id,
                 window_label,
@@ -1369,6 +1394,11 @@ impl PluginSessionManager {
                     }
                 }
                 let placeholder = format!("Search {}...", plugin.name);
+                let plugin_icon = self.resolve_feature_icon_uri(&plugin, feature_code);
+                let plugin_icon_is_dark = plugin_icon
+                    .as_deref()
+                    .and_then(|uri| self.analyze_plugin_icon_cached(uri));
+                self.record_successful_launch(&plugin.id, feature_code);
                 return Ok(LaunchResult::ListMode {
                     session_id,
                     plugin_id: plugin.id,
@@ -1376,6 +1406,8 @@ impl PluginSessionManager {
                     feature_code: feature_code.to_string(),
                     placeholder: Some(placeholder),
                     items,
+                    plugin_icon,
+                    plugin_icon_is_dark,
                 });
             }
 
@@ -1383,6 +1415,7 @@ impl PluginSessionManager {
                 sessions.remove(&session_id);
             }
             let message = extract_headless_message(&enter_val);
+            self.record_successful_launch(&plugin.id, feature_code);
             return Ok(LaunchResult::ExecutedHeadless {
                 plugin_id: plugin.id,
                 feature_code: feature_code.to_string(),
@@ -1543,6 +1576,825 @@ impl PluginSessionManager {
             items: next_items,
         })
     }
+
+    /// Returns persisted zero-query launcher home sections (`recent`, `pinned`, `featured`)
+    /// enriched with monochrome icon adaptation, target path, pin flags, and usage counts (`SPEC-016-R2`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if seeding or reading persisted LMDB launcher state fails.
+    pub fn launcher_home_sections(
+        &self,
+        limit: Option<usize>,
+    ) -> std::result::Result<HomeSectionsResponse, String> {
+        self.ensure_pinned_seeded()?;
+        let cap = limit.unwrap_or(27).clamp(1, 54);
+        let snap = self.snapshot_launcher_state();
+
+        let mut recent: Vec<LauncherHit> = snap
+            .recent_history
+            .iter()
+            .filter(|r| {
+                !snap
+                    .removed_recent_keys
+                    .contains(&(r.plugin_id.clone(), r.feature_code.clone()))
+            })
+            .enumerate()
+            .filter_map(|(idx, r)| self.resolve_hit_for_ref(r, "recent", idx))
+            .collect();
+        self.enrich_hits_with_snapshot(&mut recent, &snap);
+
+        let mut pinned: Vec<LauncherHit> = snap
+            .pinned_items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, r)| self.resolve_hit_for_ref(r, "pinned", idx))
+            .collect();
+        self.enrich_hits_with_snapshot(&mut pinned, &snap);
+
+        let mut featured = self.featured_home_items_raw(cap);
+        self.enrich_hits_with_snapshot(&mut featured, &snap);
+
+        Ok(HomeSectionsResponse {
+            recent,
+            pinned,
+            featured,
+        })
+    }
+
+    /// Applies a host-only launcher state mutation, persists to LMDB `"__host_launcher__"`,
+    /// and returns the refreshed [`HomeSectionsResponse`] (`SPEC-016-R2`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if the mutation references empty identifiers, the lock is poisoned,
+    /// or LMDB persistence fails.
+    pub fn launcher_mutate_state(
+        &self,
+        mutation: LauncherStateMutation,
+    ) -> std::result::Result<HomeSectionsResponse, String> {
+        if matches!(
+            mutation,
+            LauncherStateMutation::Pin { .. } | LauncherStateMutation::Unpin { .. }
+        ) {
+            self.ensure_pinned_seeded()?;
+        }
+
+        {
+            let mut state = self
+                .launcher_state
+                .lock()
+                .map_err(|_| "launcher state lock poisoned".to_string())?;
+            match mutation {
+                LauncherStateMutation::Pin {
+                    plugin_id,
+                    feature_code,
+                } => {
+                    validate_item_ref(&plugin_id, &feature_code)?;
+                    state.pinned_initialized = true;
+                    if !state
+                        .pinned_items
+                        .iter()
+                        .any(|r| r.plugin_id == plugin_id && r.feature_code == feature_code)
+                    {
+                        state.pinned_items.push(LauncherItemRef {
+                            plugin_id,
+                            feature_code,
+                        });
+                    }
+                    persist_pinned_items(&self.storage, &state)?;
+                }
+                LauncherStateMutation::Unpin {
+                    plugin_id,
+                    feature_code,
+                } => {
+                    validate_item_ref(&plugin_id, &feature_code)?;
+                    state.pinned_initialized = true;
+                    state
+                        .pinned_items
+                        .retain(|r| !(r.plugin_id == plugin_id && r.feature_code == feature_code));
+                    persist_pinned_items(&self.storage, &state)?;
+                }
+                LauncherStateMutation::ReorderPinned { items } => {
+                    state.pinned_initialized = true;
+                    state.pinned_items = dedupe_item_refs(items);
+                    persist_pinned_items(&self.storage, &state)?;
+                }
+                LauncherStateMutation::RemoveRecent {
+                    plugin_id,
+                    feature_code,
+                } => {
+                    validate_item_ref(&plugin_id, &feature_code)?;
+                    state
+                        .recent_history
+                        .retain(|r| !(r.plugin_id == plugin_id && r.feature_code == feature_code));
+                    state.removed_recent_keys.insert((plugin_id, feature_code));
+                    persist_recent_history(&self.storage, &state)?;
+                    persist_removed_recent_keys(&self.storage, &state)?;
+                }
+                LauncherStateMutation::PinRecommendation {
+                    plugin_id,
+                    feature_code,
+                } => {
+                    validate_item_ref(&plugin_id, &feature_code)?;
+                    if !state
+                        .recommendation_pinned
+                        .iter()
+                        .any(|r| r.plugin_id == plugin_id && r.feature_code == feature_code)
+                    {
+                        state.recommendation_pinned.push(LauncherItemRef {
+                            plugin_id,
+                            feature_code,
+                        });
+                        persist_recommendation_pinned(&self.storage, &state)?;
+                    }
+                }
+                LauncherStateMutation::UnpinRecommendation {
+                    plugin_id,
+                    feature_code,
+                } => {
+                    validate_item_ref(&plugin_id, &feature_code)?;
+                    let before = state.recommendation_pinned.len();
+                    state
+                        .recommendation_pinned
+                        .retain(|r| !(r.plugin_id == plugin_id && r.feature_code == feature_code));
+                    if state.recommendation_pinned.len() != before {
+                        persist_recommendation_pinned(&self.storage, &state)?;
+                    }
+                }
+                LauncherStateMutation::MoveRecommendationToFront {
+                    plugin_id,
+                    feature_code,
+                } => {
+                    validate_item_ref(&plugin_id, &feature_code)?;
+                    if let Some(pos) = state
+                        .recommendation_pinned
+                        .iter()
+                        .position(|r| r.plugin_id == plugin_id && r.feature_code == feature_code)
+                    {
+                        if pos > 0 {
+                            let item = state.recommendation_pinned.remove(pos);
+                            state.recommendation_pinned.insert(0, item);
+                            persist_recommendation_pinned(&self.storage, &state)?;
+                        }
+                    }
+                }
+            }
+        }
+
+        self.launcher_home_sections(None)
+    }
+
+    /// Reveals the canonical local `.app` bundle or plugin directory in Finder / file manager (`SPEC-016-R2`).
+    ///
+    /// Looks up the path strictly from `app_catalog` or `loaded_plugins` (never trusting raw path strings).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if spawning `/usr/bin/open -R` (or the host file manager) fails.
+    pub fn reveal_in_finder(
+        &self,
+        plugin_id: &str,
+        feature_code: &str,
+    ) -> std::result::Result<bool, String> {
+        let Some(raw_path) = self.resolve_target_path(plugin_id, feature_code) else {
+            return Ok(false);
+        };
+        let candidate = Path::new(&raw_path);
+        if !candidate.exists() {
+            return Ok(false);
+        }
+        let canonical =
+            std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+        #[cfg(target_os = "macos")]
+        {
+            let status = std::process::Command::new("/usr/bin/open")
+                .arg("-R")
+                .arg(&canonical)
+                .status()
+                .map_err(|e| format!("failed to run /usr/bin/open -R: {e}"))?;
+            Ok(status.success())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.window_controller()
+                .show_item_in_folder(&canonical.to_string_lossy())?;
+            Ok(true)
+        }
+    }
+
+    /// Enriches `hits` with host metadata (`kind`, `icon_is_dark`, `target_path`, pin flags, `use_count`).
+    pub fn enrich_hits(&self, hits: &mut [LauncherHit]) {
+        let snap = self.snapshot_launcher_state();
+        self.enrich_hits_with_snapshot(hits, &snap);
+    }
+
+    /// Enriches `search_features` hits and applies ZTools `recommendation_pinned` priority ordering
+    /// on `"over"` matches plus `use_count` tie-breaking (`SPEC-016-R2`).
+    pub fn enrich_and_rank_search_hits(&self, hits: &mut [LauncherHit]) {
+        let snap = self.snapshot_launcher_state();
+        self.enrich_hits_with_snapshot(hits, &snap);
+        hits.sort_by(|a, b| {
+            let key_a = (a.plugin_id.clone(), a.feature_code.clone());
+            let key_b = (b.plugin_id.clone(), b.feature_code.clone());
+            let pin_rank_a = if a.match_type == "over" {
+                snap.rec_pin_index
+                    .get(&key_a)
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            } else {
+                usize::MAX
+            };
+            let pin_rank_b = if b.match_type == "over" {
+                snap.rec_pin_index
+                    .get(&key_b)
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            } else {
+                usize::MAX
+            };
+            let count_a = a.use_count.unwrap_or(0);
+            let count_b = b.use_count.unwrap_or(0);
+
+            Reverse(a.score)
+                .cmp(&Reverse(b.score))
+                .then_with(|| pin_rank_a.cmp(&pin_rank_b))
+                .then_with(|| Reverse(count_a).cmp(&Reverse(count_b)))
+        });
+    }
+
+    /// Resolves and caches ZTools monochrome `icon_is_dark` status for a plugin icon URI or path.
+    ///
+    /// Returns `None` for full-color icons, unreadable/non-raster icons, or SVG data URLs.
+    #[must_use]
+    pub fn analyze_plugin_icon_cached(&self, icon_uri: &str) -> Option<bool> {
+        let trimmed = icon_uri.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let cache_key = format!("{:x}", Sha256::digest(trimmed.as_bytes()));
+        if let Ok(guard) = self.icon_analysis_cache.lock() {
+            if let Some(&cached) = guard.get(&cache_key) {
+                return cached;
+            }
+        }
+
+        let computed = if trimmed.starts_with("data:image/") {
+            analyze_icon_data_url(trimmed).icon_is_dark_hint()
+        } else if let Some(icon_id) = trimmed
+            .strip_prefix("aitools-plugin://__app_icon__/")
+            .and_then(|s| s.split(['?', '#']).next())
+            .and_then(|s| s.strip_suffix(".png"))
+        {
+            self.mounts
+                .get_icon_source(icon_id)
+                .and_then(|path| analyze_icon_path(&path).icon_is_dark_hint())
+        } else if let Some((plugin_id, rel_path)) = parse_aitools_plugin_uri(trimmed) {
+            self.mounts.get_root(plugin_id).and_then(|root| {
+                let rel_clean = rel_path.trim_start_matches('/');
+                let candidate = root.join(rel_clean);
+                let canon = std::fs::canonicalize(candidate).ok()?;
+                if canon.starts_with(&root) {
+                    analyze_icon_path(&canon).icon_is_dark_hint()
+                } else {
+                    None
+                }
+            })
+        } else {
+            let p = Path::new(trimmed);
+            if p.is_file() {
+                analyze_icon_path(p).icon_is_dark_hint()
+            } else {
+                None
+            }
+        };
+
+        if let Ok(mut guard) = self.icon_analysis_cache.lock() {
+            if guard.len() >= MAX_ICON_ANALYSIS_CACHE {
+                guard.clear();
+            }
+            guard.insert(cache_key, computed);
+        }
+        computed
+    }
+
+    /// Resolves the canonical filesystem path for `reveal_in_finder` / `LauncherHit::target_path`.
+    #[must_use]
+    pub fn resolve_target_path(&self, plugin_id: &str, feature_code: &str) -> Option<String> {
+        if plugin_id == "system-apps" || feature_code.starts_with("app:") {
+            if let Ok(apps) = self.app_catalog.read() {
+                if let Some(app) = apps.get(feature_code) {
+                    if !app.path.is_empty() {
+                        return Some(app.path.clone());
+                    }
+                }
+                if !feature_code.starts_with("app:") {
+                    let prefixed = format!("app:{feature_code}");
+                    if let Some(app) = apps.get(&prefixed) {
+                        if !app.path.is_empty() {
+                            return Some(app.path.clone());
+                        }
+                    }
+                }
+            }
+            return None;
+        }
+        if let Ok(plugins) = self.loaded_plugins.read() {
+            if let Some(plugin) = plugins.get(plugin_id) {
+                return Some(plugin.root_dir.to_string_lossy().into_owned());
+            }
+        }
+        None
+    }
+
+    fn record_successful_launch(&self, plugin_id: &str, feature_code: &str) {
+        let pid = plugin_id.trim();
+        let fcode = feature_code.trim();
+        if pid.is_empty() || fcode.is_empty() {
+            return;
+        }
+        let Ok(mut state) = self.launcher_state.lock() else {
+            return;
+        };
+        let key = (pid.to_string(), fcode.to_string());
+        let next_count = state
+            .usage_stats
+            .get(&key)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
+        state.usage_stats.insert(key.clone(), next_count);
+        let cleared_removed = state.removed_recent_keys.remove(&key);
+
+        state
+            .recent_history
+            .retain(|r| !(r.plugin_id == pid && r.feature_code == fcode));
+        state.recent_history.insert(
+            0,
+            LauncherItemRef {
+                plugin_id: pid.to_string(),
+                feature_code: fcode.to_string(),
+            },
+        );
+        if state.recent_history.len() > MAX_RECENT_HISTORY {
+            state.recent_history.truncate(MAX_RECENT_HISTORY);
+        }
+
+        let _ = persist_recent_history(&self.storage, &state);
+        let _ = persist_usage_stats(&self.storage, &state);
+        if cleared_removed {
+            let _ = persist_removed_recent_keys(&self.storage, &state);
+        }
+    }
+
+    pub(crate) fn ensure_pinned_seeded(&self) -> std::result::Result<(), String> {
+        let already_initialized = self
+            .launcher_state
+            .lock()
+            .is_ok_and(|g| g.pinned_initialized);
+        if already_initialized {
+            return Ok(());
+        }
+        let seed_candidates = self.curated_pinned_seed_candidates();
+        if seed_candidates.is_empty() {
+            return Ok(());
+        }
+        let mut state = self
+            .launcher_state
+            .lock()
+            .map_err(|_| "launcher state lock poisoned".to_string())?;
+        if !state.pinned_initialized {
+            state.pinned_items = seed_candidates;
+            state.pinned_initialized = true;
+            persist_pinned_items(&self.storage, &state)?;
+        }
+        Ok(())
+    }
+
+    fn snapshot_launcher_state(&self) -> LauncherStateSnapshot {
+        let Ok(state) = self.launcher_state.lock() else {
+            return LauncherStateSnapshot::default();
+        };
+        let pinned_set: HashSet<(String, String)> = state
+            .pinned_items
+            .iter()
+            .map(|r| (r.plugin_id.clone(), r.feature_code.clone()))
+            .collect();
+        let rec_pin_index: HashMap<(String, String), usize> = state
+            .recommendation_pinned
+            .iter()
+            .enumerate()
+            .map(|(idx, r)| ((r.plugin_id.clone(), r.feature_code.clone()), idx))
+            .collect();
+        LauncherStateSnapshot {
+            recent_history: state.recent_history.clone(),
+            pinned_items: state.pinned_items.clone(),
+            pinned_set,
+            rec_pin_index,
+            usage_stats: state.usage_stats.clone(),
+            removed_recent_keys: state.removed_recent_keys.clone(),
+        }
+    }
+
+    fn enrich_hits_with_snapshot(&self, hits: &mut [LauncherHit], snap: &LauncherStateSnapshot) {
+        for hit in hits.iter_mut() {
+            if let Some(kind) = self.classify_hit_kind(&hit.plugin_id, &hit.feature_code) {
+                hit.kind = Some(kind);
+            }
+            if hit.plugin_id == "system-apps" || hit.feature_code.starts_with("app:") {
+                hit.icon_is_dark = None;
+            } else {
+                hit.icon_is_dark = hit
+                    .icon
+                    .as_deref()
+                    .and_then(|uri| self.analyze_plugin_icon_cached(uri));
+            }
+            if hit.target_path.is_none() {
+                hit.target_path = self.resolve_target_path(&hit.plugin_id, &hit.feature_code);
+            }
+            let key = (hit.plugin_id.clone(), hit.feature_code.clone());
+            hit.is_pinned = snap.pinned_set.contains(&key).then_some(true);
+            hit.is_recommendation_pinned = snap.rec_pin_index.contains_key(&key).then_some(true);
+            hit.use_count = snap.usage_stats.get(&key).copied().filter(|&c| c > 0);
+        }
+    }
+
+    fn resolve_hit_for_ref(
+        &self,
+        item: &LauncherItemRef,
+        section_match_type: &str,
+        idx: usize,
+    ) -> Option<LauncherHit> {
+        let score = i32::try_from(100usize.saturating_sub(idx))
+            .unwrap_or(1)
+            .max(1);
+        let meta = self
+            .search_index
+            .read()
+            .ok()
+            .and_then(|index| index.feature_meta(&item.plugin_id, &item.feature_code));
+        if let Some(meta) = meta {
+            return Some(LauncherHit {
+                feature_code: item.feature_code.clone(),
+                plugin_id: item.plugin_id.clone(),
+                label: meta.label,
+                plugin_name: meta.plugin_name,
+                description: meta.explain.clone(),
+                icon: meta.icon,
+                kind: self.classify_hit_kind(&item.plugin_id, &item.feature_code),
+                score,
+                match_type: section_match_type.to_string(),
+                confidence: 1.0,
+                explain: meta.explain,
+                icon_is_dark: None,
+                target_path: None,
+                is_pinned: None,
+                is_recommendation_pinned: None,
+                use_count: None,
+            });
+        }
+
+        if item.plugin_id == "system-apps" || item.feature_code.starts_with("app:") {
+            if let Ok(apps) = self.app_catalog.read() {
+                let lookup = if item.feature_code.starts_with("app:") {
+                    item.feature_code.clone()
+                } else {
+                    format!("app:{}", item.feature_code)
+                };
+                if let Some(app) = apps.get(&lookup) {
+                    let explain = app
+                        .bundle_id
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .map_or_else(|| app.path.clone(), ToString::to_string);
+                    let icon = app
+                        .icon_path
+                        .as_deref()
+                        .and_then(|p| self.mounts.register_icon(p));
+                    return Some(LauncherHit {
+                        feature_code: lookup,
+                        plugin_id: "system-apps".to_string(),
+                        label: app.name.clone(),
+                        plugin_name: "Application".to_string(),
+                        description: explain.clone(),
+                        icon,
+                        kind: Some("app".to_string()),
+                        score,
+                        match_type: section_match_type.to_string(),
+                        confidence: 1.0,
+                        explain,
+                        icon_is_dark: None,
+                        target_path: Some(app.path.clone()),
+                        is_pinned: None,
+                        is_recommendation_pinned: None,
+                        use_count: None,
+                    });
+                }
+            }
+            return None;
+        }
+
+        if item.feature_code.starts_with("macro:") {
+            let label = item.feature_code.trim_start_matches("macro:").to_string();
+            return Some(LauncherHit {
+                feature_code: item.feature_code.clone(),
+                plugin_id: item.plugin_id.clone(),
+                label: label.clone(),
+                plugin_name: "Saved Macros".to_string(),
+                description: label.clone(),
+                icon: None,
+                kind: Some("macro".to_string()),
+                score,
+                match_type: section_match_type.to_string(),
+                confidence: 1.0,
+                explain: label,
+                icon_is_dark: None,
+                target_path: None,
+                is_pinned: None,
+                is_recommendation_pinned: None,
+                use_count: None,
+            });
+        }
+
+        None
+    }
+
+    fn resolve_feature_icon_uri(
+        &self,
+        plugin: &LoadedPlugin,
+        feature_code: &str,
+    ) -> Option<String> {
+        let mut map_local_icon = |local_path: &Path| -> Option<String> {
+            if local_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
+            {
+                None
+            } else {
+                self.mounts.register_icon(local_path)
+            }
+        };
+
+        let mut feature_raw_icon: Option<String> = None;
+        if let Some(ref v1) = plugin.v1 {
+            feature_raw_icon = v1
+                .features
+                .iter()
+                .find(|f| f.code == feature_code)
+                .and_then(|f| f.icon.clone());
+        } else if let Some(ref v2) = plugin.v2 {
+            feature_raw_icon = v2
+                .features
+                .iter()
+                .find(|f| f.code == feature_code)
+                .and_then(|f| f.icon.clone());
+        }
+        if feature_raw_icon.is_none() {
+            if let Ok(dyn_map) = self.dynamic_features.read() {
+                if let Some(list) = dyn_map.get(&plugin.id) {
+                    feature_raw_icon = list
+                        .iter()
+                        .find(|f| f.code == feature_code)
+                        .and_then(|f| f.icon.clone());
+                }
+            }
+        }
+
+        plugin
+            .resolve_icon_with_mapper(feature_raw_icon.as_deref(), &mut map_local_icon)
+            .or_else(|| {
+                plugin.resolve_icon_with_mapper(plugin.declared_icon_raw(), &mut map_local_icon)
+            })
+            .or_else(|| plugin.icon.clone())
+    }
+}
+
+#[derive(Debug, Default)]
+struct LauncherStateSnapshot {
+    recent_history: Vec<LauncherItemRef>,
+    pinned_items: Vec<LauncherItemRef>,
+    pinned_set: HashSet<(String, String)>,
+    rec_pin_index: HashMap<(String, String), usize>,
+    usage_stats: HashMap<(String, String), u64>,
+    removed_recent_keys: HashSet<(String, String)>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ItemsDoc {
+    #[serde(default)]
+    items: Vec<LauncherItemRef>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PinnedItemsDoc {
+    #[serde(default)]
+    initialized: bool,
+    #[serde(default)]
+    items: Vec<LauncherItemRef>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct UsageStatEntry {
+    plugin_id: String,
+    feature_code: String,
+    count: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct UsageStatsDoc {
+    #[serde(default)]
+    items: Vec<UsageStatEntry>,
+}
+
+pub(crate) fn load_host_launcher_state(storage: &StorageEngine) -> HostLauncherState {
+    let mut state = HostLauncherState::default();
+
+    if let Ok(Some(doc)) = storage.get_doc(HOST_LAUNCHER_BUCKET, DOC_RECENT_HISTORY) {
+        if let Ok(parsed) = serde_json::from_value::<ItemsDoc>(doc.data) {
+            let mut items = dedupe_item_refs(parsed.items);
+            if items.len() > MAX_RECENT_HISTORY {
+                items.truncate(MAX_RECENT_HISTORY);
+            }
+            state.recent_history = items;
+        }
+    }
+
+    if let Ok(Some(doc)) = storage.get_doc(HOST_LAUNCHER_BUCKET, DOC_PINNED_ITEMS) {
+        if let Ok(parsed) = serde_json::from_value::<PinnedItemsDoc>(doc.data) {
+            state.pinned_initialized = parsed.initialized || !parsed.items.is_empty();
+            state.pinned_items = dedupe_item_refs(parsed.items);
+        }
+    }
+
+    if let Ok(Some(doc)) = storage.get_doc(HOST_LAUNCHER_BUCKET, DOC_RECOMMENDATION_PINNED) {
+        if let Ok(parsed) = serde_json::from_value::<ItemsDoc>(doc.data) {
+            state.recommendation_pinned = dedupe_item_refs(parsed.items);
+        }
+    }
+
+    if let Ok(Some(doc)) = storage.get_doc(HOST_LAUNCHER_BUCKET, DOC_USAGE_STATS) {
+        if let Ok(parsed) = serde_json::from_value::<UsageStatsDoc>(doc.data) {
+            for entry in parsed.items {
+                if !entry.plugin_id.trim().is_empty()
+                    && !entry.feature_code.trim().is_empty()
+                    && entry.count > 0
+                {
+                    state
+                        .usage_stats
+                        .insert((entry.plugin_id, entry.feature_code), entry.count);
+                }
+            }
+        }
+    }
+
+    if let Ok(Some(doc)) = storage.get_doc(HOST_LAUNCHER_BUCKET, DOC_REMOVED_RECENT_KEYS) {
+        if let Ok(parsed) = serde_json::from_value::<ItemsDoc>(doc.data) {
+            for r in dedupe_item_refs(parsed.items) {
+                state
+                    .removed_recent_keys
+                    .insert((r.plugin_id, r.feature_code));
+            }
+        }
+    }
+
+    state
+}
+
+fn save_host_doc(
+    storage: &StorageEngine,
+    doc_id: &str,
+    data: Value,
+) -> std::result::Result<(), String> {
+    let existing_rev = storage
+        .get_doc(HOST_LAUNCHER_BUCKET, doc_id)
+        .map_err(|e| e.to_string())?
+        .and_then(|d| d.rev);
+    let res = storage
+        .put_doc(
+            HOST_LAUNCHER_BUCKET,
+            Document {
+                id: doc_id.to_string(),
+                rev: existing_rev,
+                data,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    if res.error == Some(true) {
+        return Err(res
+            .message
+            .unwrap_or_else(|| format!("failed writing {doc_id} to LMDB")));
+    }
+    Ok(())
+}
+
+fn persist_recent_history(
+    storage: &StorageEngine,
+    state: &HostLauncherState,
+) -> std::result::Result<(), String> {
+    let payload = serde_json::to_value(ItemsDoc {
+        items: state.recent_history.clone(),
+    })
+    .map_err(|e| e.to_string())?;
+    save_host_doc(storage, DOC_RECENT_HISTORY, payload)
+}
+
+fn persist_pinned_items(
+    storage: &StorageEngine,
+    state: &HostLauncherState,
+) -> std::result::Result<(), String> {
+    let payload = serde_json::to_value(PinnedItemsDoc {
+        initialized: state.pinned_initialized,
+        items: state.pinned_items.clone(),
+    })
+    .map_err(|e| e.to_string())?;
+    save_host_doc(storage, DOC_PINNED_ITEMS, payload)
+}
+
+fn persist_recommendation_pinned(
+    storage: &StorageEngine,
+    state: &HostLauncherState,
+) -> std::result::Result<(), String> {
+    let payload = serde_json::to_value(ItemsDoc {
+        items: state.recommendation_pinned.clone(),
+    })
+    .map_err(|e| e.to_string())?;
+    save_host_doc(storage, DOC_RECOMMENDATION_PINNED, payload)
+}
+
+fn persist_usage_stats(
+    storage: &StorageEngine,
+    state: &HostLauncherState,
+) -> std::result::Result<(), String> {
+    let mut items: Vec<UsageStatEntry> = state
+        .usage_stats
+        .iter()
+        .filter(|(_, &count)| count > 0)
+        .map(|((plugin_id, feature_code), &count)| UsageStatEntry {
+            plugin_id: plugin_id.clone(),
+            feature_code: feature_code.clone(),
+            count,
+        })
+        .collect();
+    items.sort_by(|a, b| {
+        a.plugin_id
+            .cmp(&b.plugin_id)
+            .then_with(|| a.feature_code.cmp(&b.feature_code))
+    });
+    let payload = serde_json::to_value(UsageStatsDoc { items }).map_err(|e| e.to_string())?;
+    save_host_doc(storage, DOC_USAGE_STATS, payload)
+}
+
+fn persist_removed_recent_keys(
+    storage: &StorageEngine,
+    state: &HostLauncherState,
+) -> std::result::Result<(), String> {
+    let mut items: Vec<LauncherItemRef> = state
+        .removed_recent_keys
+        .iter()
+        .map(|(plugin_id, feature_code)| LauncherItemRef {
+            plugin_id: plugin_id.clone(),
+            feature_code: feature_code.clone(),
+        })
+        .collect();
+    items.sort_by(|a, b| {
+        a.plugin_id
+            .cmp(&b.plugin_id)
+            .then_with(|| a.feature_code.cmp(&b.feature_code))
+    });
+    let payload = serde_json::to_value(ItemsDoc { items }).map_err(|e| e.to_string())?;
+    save_host_doc(storage, DOC_REMOVED_RECENT_KEYS, payload)
+}
+
+fn validate_item_ref(plugin_id: &str, feature_code: &str) -> std::result::Result<(), String> {
+    if plugin_id.trim().is_empty() || feature_code.trim().is_empty() {
+        return Err("plugin_id and feature_code must not be empty".to_string());
+    }
+    Ok(())
+}
+
+fn dedupe_item_refs(items: Vec<LauncherItemRef>) -> Vec<LauncherItemRef> {
+    let mut seen: HashSet<(String, String)> = HashSet::with_capacity(items.len());
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        if item.plugin_id.trim().is_empty() || item.feature_code.trim().is_empty() {
+            continue;
+        }
+        if seen.insert((item.plugin_id.clone(), item.feature_code.clone())) {
+            out.push(item);
+        }
+    }
+    out
+}
+
+fn parse_aitools_plugin_uri(raw_uri: &str) -> Option<(&str, &str)> {
+    let rest = raw_uri.strip_prefix("aitools-plugin://")?;
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    let (host, path) = rest.split_once('/')?;
+    if host.is_empty() || path.is_empty() {
+        return None;
+    }
+    Some((host, path))
 }
 
 fn conflict_write_result(id: &str, message: &str) -> PluginDataWriteResult {

@@ -1,6 +1,9 @@
 const COMMANDS: &[&str] = &[
     "search_features",
     "featured_home_items",
+    "launcher_home_sections",
+    "launcher_mutate_state",
+    "reveal_in_finder",
     "zero_query_suggestions",
     "launch_item",
     "search_list_mode",

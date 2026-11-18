@@ -53,6 +53,22 @@ pub struct LauncherHit {
     pub confidence: f64,
     /// Human-readable explanation / subtitle matching `FeatureEntry::explain`.
     pub explain: String,
+    /// `Some(bool)` only when a pure-color monochrome icon needs light/dark inversion per ZTools
+    /// `imageAnalysis.ts`; `None` for full-color icons and `system-apps` `.app` icons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_is_dark: Option<bool>,
+    /// Local `.app` bundle or plugin root directory path eligible for `打开文件位置`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_path: Option<String>,
+    /// `Some(true)` if pinned in `已固定`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_pinned: Option<bool>,
+    /// `Some(true)` if pinned in `匹配推荐`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_recommendation_pinned: Option<bool>,
+    /// Persisted host launch count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_count: Option<u64>,
 }
 
 impl LauncherHit {
@@ -83,6 +99,11 @@ impl LauncherHit {
             match_type: m.match_type.to_string(),
             confidence,
             explain,
+            icon_is_dark: None,
+            target_path: None,
+            is_pinned: None,
+            is_recommendation_pinned: None,
+            use_count: None,
         }
     }
 }
@@ -113,6 +134,11 @@ impl From<MatchResult> for LauncherHit {
             match_type: m.match_type.to_string(),
             confidence,
             explain: String::new(),
+            icon_is_dark: None,
+            target_path: None,
+            is_pinned: None,
+            is_recommendation_pinned: None,
+            use_count: None,
         }
     }
 }
@@ -244,5 +270,51 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn launcher_hit_wire_optional_fields_skip_when_none_and_roundtrip_when_set() {
+        let index = build_index(&sample_features()).unwrap();
+        let fast = evaluate_launcher_input(&index, "calc", false, false).unwrap();
+        let LauncherDecision::DeterministicResults { mut matches, .. } = fast else {
+            panic!("expected deterministic hit");
+        };
+        let mut hit = matches.remove(0);
+
+        let minimal_json = serde_json::to_value(&hit).unwrap();
+        for omitted in [
+            "icon_is_dark",
+            "target_path",
+            "is_pinned",
+            "is_recommendation_pinned",
+            "use_count",
+        ] {
+            assert!(
+                minimal_json.get(omitted).is_none(),
+                "{omitted} must be omitted when None"
+            );
+        }
+
+        hit.icon_is_dark = Some(true);
+        hit.target_path = Some("/Applications/Calculator.app".into());
+        hit.is_pinned = Some(true);
+        hit.is_recommendation_pinned = Some(true);
+        hit.use_count = Some(7);
+
+        let full_json = serde_json::to_value(&hit).unwrap();
+        assert_eq!(full_json["icon_is_dark"], serde_json::json!(true));
+        assert_eq!(
+            full_json["target_path"],
+            serde_json::json!("/Applications/Calculator.app")
+        );
+        assert_eq!(full_json["is_pinned"], serde_json::json!(true));
+        assert_eq!(
+            full_json["is_recommendation_pinned"],
+            serde_json::json!(true)
+        );
+        assert_eq!(full_json["use_count"], serde_json::json!(7));
+
+        let roundtrip: LauncherHit = serde_json::from_value(full_json).unwrap();
+        assert_eq!(roundtrip, hit);
     }
 }

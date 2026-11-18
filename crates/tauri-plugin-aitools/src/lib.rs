@@ -47,9 +47,10 @@ use crate::protocols::{
     PluginMountRegistry, ProtocolReply,
 };
 pub use crate::session::{
-    DshPreloadSummary, HostWindowController, KeychainApiKeyProvider, LaunchResult,
-    ListSearchResponse, NoopWindowController, PluginSessionManager, PluginWindowSpec,
-    PreloadPluginStatus, SelectListResult, SessionDependencies, SyncZtoolsResult,
+    DshPreloadSummary, HomeSectionsResponse, HostWindowController, KeychainApiKeyProvider,
+    LaunchResult, LauncherItemRef, LauncherStateMutation, ListSearchResponse, NoopWindowController,
+    PluginSessionManager, PluginWindowSpec, PreloadPluginStatus, SelectListResult,
+    SessionDependencies, SyncZtoolsResult,
 };
 
 /// Errors returned by public `tauri-plugin-aitools` setup and window builders.
@@ -551,17 +552,12 @@ fn search_features<R: Runtime>(
     let mut decision = evaluate_launcher_input(&index, &query, tab_pressed, submitted)
         .map_err(|e| e.to_string())?;
     if let LauncherDecision::DeterministicResults {
-        ref mut matches, ..
+        ref mut matches,
+        ref mut top_confidence,
     } = decision
     {
-        for hit in matches.iter_mut() {
-            if let Some(kind) = state
-                .sessions
-                .classify_hit_kind(&hit.plugin_id, &hit.feature_code)
-            {
-                hit.kind = Some(kind);
-            }
-        }
+        state.sessions.enrich_and_rank_search_hits(matches);
+        *top_confidence = matches.first().map_or(0.0, |h| h.confidence);
     }
     Ok(decision)
 }
@@ -575,6 +571,37 @@ fn featured_home_items<R: Runtime>(
     ensure_host_webview(webview.label())?;
     let clamped = limit.unwrap_or(27).clamp(1, 54);
     Ok(state.sessions.featured_home_items(clamped))
+}
+
+#[tauri::command]
+fn launcher_home_sections<R: Runtime>(
+    limit: Option<usize>,
+    webview: tauri::Webview<R>,
+    state: tauri::State<'_, AitoolsState>,
+) -> std::result::Result<HomeSectionsResponse, String> {
+    ensure_host_webview(webview.label())?;
+    state.sessions.launcher_home_sections(limit)
+}
+
+#[tauri::command]
+fn launcher_mutate_state<R: Runtime>(
+    mutation: LauncherStateMutation,
+    webview: tauri::Webview<R>,
+    state: tauri::State<'_, AitoolsState>,
+) -> std::result::Result<HomeSectionsResponse, String> {
+    ensure_host_webview(webview.label())?;
+    state.sessions.launcher_mutate_state(mutation)
+}
+
+#[tauri::command]
+fn reveal_in_finder<R: Runtime>(
+    plugin_id: String,
+    feature_code: String,
+    webview: tauri::Webview<R>,
+    state: tauri::State<'_, AitoolsState>,
+) -> std::result::Result<bool, String> {
+    ensure_host_webview(webview.label())?;
+    state.sessions.reveal_in_finder(&plugin_id, &feature_code)
 }
 
 #[tauri::command]
@@ -1243,6 +1270,9 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         .invoke_handler(tauri::generate_handler![
             search_features,
             featured_home_items,
+            launcher_home_sections,
+            launcher_mutate_state,
+            reveal_in_finder,
             zero_query_suggestions,
             launch_item,
             search_list_mode,
@@ -1958,5 +1988,515 @@ mod tests {
         let guest_toml = include_str!("../permissions/guest-sandbox.toml");
         assert!(default_toml.contains("allow-featured-home-items"));
         assert!(!guest_toml.contains("featured-home-items"));
+    }
+
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc: u32 = 0xffff_ffff;
+        for &b in data {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                let mask = (crc & 1).wrapping_neg();
+                crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+            }
+        }
+        !crc
+    }
+
+    fn adler32(data: &[u8]) -> u32 {
+        let mut s1: u32 = 1;
+        let mut s2: u32 = 0;
+        for &b in data {
+            s1 = (s1 + u32::from(b)) % 65521;
+            s2 = (s2 + s1) % 65521;
+        }
+        (s2 << 16) | s1
+    }
+
+    fn push_png_chunk(out: &mut Vec<u8>, tag: &[u8; 4], payload: &[u8]) {
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(tag);
+        out.extend_from_slice(payload);
+        let mut crc_input = Vec::with_capacity(4 + payload.len());
+        crc_input.extend_from_slice(tag);
+        crc_input.extend_from_slice(payload);
+        out.extend_from_slice(&crc32(&crc_input).to_be_bytes());
+    }
+
+    fn build_test_rgba_png(
+        width: u32,
+        height: u32,
+        mut pixel_fn: impl FnMut(u32, u32) -> [u8; 4],
+    ) -> Vec<u8> {
+        let mut raw = Vec::with_capacity((height * (1 + width * 4)) as usize);
+        for y in 0..height {
+            raw.push(0); // filter type 0
+            for x in 0..width {
+                raw.extend_from_slice(&pixel_fn(x, y));
+            }
+        }
+        assert!(raw.len() <= 65535);
+        let len = raw.len() as u16;
+        let nlen = !len;
+        let mut zlib = Vec::with_capacity(raw.len() + 11);
+        zlib.extend_from_slice(&[0x78, 0x01, 0x01]);
+        zlib.extend_from_slice(&len.to_le_bytes());
+        zlib.extend_from_slice(&nlen.to_le_bytes());
+        zlib.extend_from_slice(&raw);
+        zlib.extend_from_slice(&adler32(&raw).to_be_bytes());
+
+        let mut png = Vec::new();
+        png.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+        let mut ihdr = Vec::with_capacity(13);
+        ihdr.extend_from_slice(&width.to_be_bytes());
+        ihdr.extend_from_slice(&height.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit RGBA
+        push_png_chunk(&mut png, b"IHDR", &ihdr);
+        push_png_chunk(&mut png, b"IDAT", &zlib);
+        push_png_chunk(&mut png, b"IEND", &[]);
+        png
+    }
+
+    fn silhouette_png_bytes(fg: [u8; 4]) -> Vec<u8> {
+        build_test_rgba_png(32, 32, |x, y| {
+            if (8..24).contains(&x) && (8..24).contains(&y) {
+                fg
+            } else {
+                [0, 0, 0, 0]
+            }
+        })
+    }
+
+    #[test]
+    fn spec_016_r2_host_launcher_lmdb_persistence_and_curated_seed_survive_reopen() {
+        let dir = TempDir::new().unwrap();
+        let db_dir = dir.path().join("lmdb");
+        let workspace_builtin = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("plugins")
+            .join("builtin");
+
+        let app_icon = dir.path().join("app_mono.png");
+        std::fs::write(&app_icon, silhouette_png_bytes([10, 12, 14, 255])).unwrap();
+        let apps = vec![
+            aitools_native::app_catalog::LauncherApp {
+                name: "Safari".to_string(),
+                path: "/System/Cryptexes/App/System/Applications/Safari.app".to_string(),
+                aliases: vec!["com.apple.Safari".to_string()],
+                bundle_id: Some("com.apple.Safari".to_string()),
+                icon_path: Some(app_icon.to_string_lossy().into_owned()),
+            },
+            aitools_native::app_catalog::LauncherApp {
+                name: "Terminal".to_string(),
+                path: "/System/Applications/Utilities/Terminal.app".to_string(),
+                aliases: vec![],
+                bundle_id: Some("com.apple.Terminal".to_string()),
+                icon_path: None,
+            },
+        ];
+
+        {
+            let state = AitoolsState::open(&db_dir, None, &[]).unwrap();
+            let _ = state.sessions.sync_plugins_directory(&workspace_builtin);
+            state.sessions.register_apps(apps.clone()).unwrap();
+
+            let home = state.sessions.launcher_home_sections(Some(27)).unwrap();
+            assert_eq!(
+                home.pinned.len(),
+                9,
+                "expected ~9 curated initial pinned items"
+            );
+            assert!(home.pinned.iter().all(|h| h.is_pinned == Some(true)));
+            assert!(home.pinned.iter().all(|h| h.target_path.is_some()));
+
+            // system-apps icons MUST keep icon_is_dark = None even when source PNG is monochrome!
+            let safari = home
+                .featured
+                .iter()
+                .find(|h| h.feature_code == "app:Safari")
+                .unwrap();
+            assert_eq!(safari.icon_is_dark, None);
+
+            // Reorder pinned items (swap first two) and verify persistence across reopen.
+            let mut reordered: Vec<LauncherItemRef> = home
+                .pinned
+                .iter()
+                .map(|h| LauncherItemRef {
+                    plugin_id: h.plugin_id.clone(),
+                    feature_code: h.feature_code.clone(),
+                })
+                .collect();
+            reordered.swap(0, 1);
+            let after_reorder = state
+                .sessions
+                .launcher_mutate_state(LauncherStateMutation::ReorderPinned {
+                    items: reordered.clone(),
+                })
+                .unwrap();
+            assert_eq!(
+                after_reorder.pinned[0].feature_code,
+                reordered[0].feature_code
+            );
+
+            // Unpin every item down to [] and verify it stays [] after reopen (not re-seeded!).
+            for r in &reordered {
+                let _ = state
+                    .sessions
+                    .launcher_mutate_state(LauncherStateMutation::Unpin {
+                        plugin_id: r.plugin_id.clone(),
+                        feature_code: r.feature_code.clone(),
+                    })
+                    .unwrap();
+            }
+            let empty_pinned = state.sessions.launcher_home_sections(None).unwrap();
+            assert!(empty_pinned.pinned.is_empty());
+
+            // Launch json-codec + timestamp-calc, then remove json-codec from recent.
+            let _ = state
+                .sessions
+                .launch_item("format_json", "json-codec", r#"{"a":1}"#, None, None, None)
+                .unwrap();
+            let _ = state
+                .sessions
+                .launch_item("convert_timestamp", "timestamp-calc", "", None, None, None)
+                .unwrap();
+            let after_launches = state.sessions.launcher_home_sections(None).unwrap();
+            assert_eq!(after_launches.recent.len(), 2);
+            assert_eq!(after_launches.recent[0].plugin_id, "timestamp-calc");
+            assert_eq!(after_launches.recent[1].plugin_id, "json-codec");
+            assert_eq!(after_launches.recent[1].use_count, Some(1));
+
+            let after_remove = state
+                .sessions
+                .launcher_mutate_state(LauncherStateMutation::RemoveRecent {
+                    plugin_id: "json-codec".to_string(),
+                    feature_code: "format_json".to_string(),
+                })
+                .unwrap();
+            assert_eq!(after_remove.recent.len(), 1);
+            assert_eq!(after_remove.recent[0].plugin_id, "timestamp-calc");
+        }
+
+        // Reopen LMDB at same path: pinned stays [], removed recent stays excluded, usage persists!
+        {
+            let reopened = AitoolsState::open(&db_dir, None, &[]).unwrap();
+            let _ = reopened.sessions.sync_plugins_directory(&workspace_builtin);
+            reopened.sessions.register_apps(apps).unwrap();
+
+            let home = reopened.sessions.launcher_home_sections(None).unwrap();
+            assert!(
+                home.pinned.is_empty(),
+                "unpinned empty state must survive reopen without re-seeding"
+            );
+            assert_eq!(home.recent.len(), 1);
+            assert_eq!(home.recent[0].plugin_id, "timestamp-calc");
+            assert_eq!(home.recent[0].use_count, Some(1));
+
+            // Relaunching json-codec clears removed flag and increments use_count -> 2.
+            let _ = reopened
+                .sessions
+                .launch_item("format_json", "json-codec", "{}", None, None, None)
+                .unwrap();
+            let refreshed = reopened.sessions.launcher_home_sections(None).unwrap();
+            assert_eq!(refreshed.recent.len(), 2);
+            assert_eq!(refreshed.recent[0].plugin_id, "json-codec");
+            assert_eq!(refreshed.recent[0].use_count, Some(2));
+
+            // Pin one item and verify recent history cap of 36.
+            let pinned_resp = reopened
+                .sessions
+                .launcher_mutate_state(LauncherStateMutation::Pin {
+                    plugin_id: "json-codec".to_string(),
+                    feature_code: "format_json".to_string(),
+                })
+                .unwrap();
+            assert_eq!(pinned_resp.pinned.len(), 1);
+            for i in 0..40 {
+                let code = format!("macro:m-{i}");
+                let _ = reopened
+                    .sessions
+                    .launch_item(&code, "builtin", "", Some("macro"), None, None)
+                    .unwrap();
+            }
+            let capped_recent = reopened.sessions.launcher_home_sections(None).unwrap();
+            assert_eq!(capped_recent.recent.len(), 36);
+            assert_eq!(capped_recent.recent[0].feature_code, "macro:m-39");
+        }
+    }
+
+    #[test]
+    fn spec_016_r2_icon_adaptation_list_mode_and_search_ranking() {
+        let dir = TempDir::new().unwrap();
+        let plugins_dir = dir.path().join("plugins");
+
+        // 1. Dark monochrome file-path icon (list mode preload plugin)
+        let dark_dir = plugins_dir.join("dark-list");
+        std::fs::create_dir_all(&dark_dir).unwrap();
+        std::fs::write(
+            dark_dir.join("logo.png"),
+            silhouette_png_bytes([15, 18, 22, 255]),
+        )
+        .unwrap();
+        std::fs::write(
+            dark_dir.join("plugin.json"),
+            r#"{"name":"dark-list","title":"Dark List","version":"1.0.0","logo":"logo.png","preload":"preload.js","features":[{"code":"dl","cmds":["samecmd"]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dark_dir.join("preload.js"),
+            r#"window.exports = { dl: { mode: "list", args: { enter: (_a, cb) => cb([{ title: "Row 1" }]) } } };"#,
+        )
+        .unwrap();
+
+        // 2. Light monochrome data:image/png;base64,... icon
+        let light_dir = plugins_dir.join("light-data");
+        std::fs::create_dir_all(&light_dir).unwrap();
+        let light_b64 = base64::engine::general_purpose::STANDARD
+            .encode(silhouette_png_bytes([245, 248, 252, 255]));
+        std::fs::write(
+            light_dir.join("plugin.json"),
+            format!(
+                r#"{{"name":"light-data","title":"Light Data","version":"1.0.0","logo":"data:image/png;base64,{light_b64}","preload":"preload.js","features":[{{"code":"ld","cmds":["samecmd"]}}]}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            light_dir.join("preload.js"),
+            r#"window.exports = { ld: { mode: "none", args: { enter: () => "ok" } } };"#,
+        )
+        .unwrap();
+
+        // 3. Multi-color gradient icon + three `over` plugins for recommendation ranking
+        let grad_png = build_test_rgba_png(32, 32, |x, y| {
+            if (8..24).contains(&x) && (8..24).contains(&y) {
+                [((x - 8) * 16) as u8, 40, ((y - 8) * 16) as u8, 255]
+            } else {
+                [0, 0, 0, 0]
+            }
+        });
+        for (name, extra_logo) in [
+            ("over-alpha", true),
+            ("over-beta", false),
+            ("over-gamma", false),
+        ] {
+            let pdir = plugins_dir.join(name);
+            std::fs::create_dir_all(&pdir).unwrap();
+            if extra_logo {
+                std::fs::write(pdir.join("logo.png"), &grad_png).unwrap();
+            }
+            let logo_field = if extra_logo {
+                r#""logo":"logo.png","#
+            } else {
+                ""
+            };
+            std::fs::write(
+                pdir.join("plugin.json"),
+                format!(
+                    r#"{{"name":"{name}","version":"1.0.0",{logo_field}"preload":"preload.js","features":[{{"code":"act","cmds":[{{"type":"over","label":"Run {name}"}}]}}]}}"#
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                pdir.join("preload.js"),
+                r#"window.exports = { act: { mode: "none", args: { enter: () => "done" } } };"#,
+            )
+            .unwrap();
+        }
+
+        let state = AitoolsState::open(dir.path().join("lmdb"), None, &[]).unwrap();
+        let sync_res = state.sessions.sync_plugins_directory(&plugins_dir);
+        assert_eq!(sync_res.indexed_plugins, 5);
+
+        // Launch light-data twice so it wins `use_count` tie-break over dark-list for "samecmd".
+        let _ = state
+            .sessions
+            .launch_item("ld", "light-data", "samecmd", None, None, None)
+            .unwrap();
+        let _ = state
+            .sessions
+            .launch_item("ld", "light-data", "samecmd", None, None, None)
+            .unwrap();
+
+        // Launch dark-list once -> ListMode must include plugin_icon + plugin_icon_is_dark: Some(true).
+        let list_res = state
+            .sessions
+            .launch_item("dl", "dark-list", "samecmd", Some("list"), None, None)
+            .unwrap();
+        match list_res {
+            LaunchResult::ListMode {
+                plugin_icon,
+                plugin_icon_is_dark,
+                ..
+            } => {
+                assert!(plugin_icon.is_some());
+                assert_eq!(plugin_icon_is_dark, Some(true));
+            }
+            other => panic!("expected ListMode, got {other:?}"),
+        }
+
+        // Verify search_features enrichment + use_count tie-break
+        let search_same = {
+            let idx = state.search_index.read().unwrap();
+            let LauncherDecision::DeterministicResults { mut matches, .. } =
+                evaluate_launcher_input(&idx, "samecmd", false, false).unwrap()
+            else {
+                panic!("expected hits");
+            };
+            state.sessions.enrich_and_rank_search_hits(&mut matches);
+            matches
+        };
+        assert_eq!(search_same[0].plugin_id, "light-data");
+        assert_eq!(search_same[0].use_count, Some(2));
+        assert_eq!(search_same[0].icon_is_dark, Some(false));
+        assert_eq!(search_same[1].plugin_id, "dark-list");
+        assert_eq!(search_same[1].use_count, Some(1));
+        assert_eq!(search_same[1].icon_is_dark, Some(true));
+
+        // Verify gradient icon has icon_is_dark == None and over-gamma usage + recommendation pinning.
+        // Ensure over-alpha starts unpinned in `pinned_items` so isolation from `recommendation_pinned` is explicit.
+        let before_rec_pinned: Vec<(String, String)> = state
+            .sessions
+            .launcher_mutate_state(LauncherStateMutation::Unpin {
+                plugin_id: "over-alpha".to_string(),
+                feature_code: "act".to_string(),
+            })
+            .unwrap()
+            .pinned
+            .into_iter()
+            .map(|h| (h.plugin_id, h.feature_code))
+            .collect();
+        for _ in 0..3 {
+            let _ = state
+                .sessions
+                .launch_item("act", "over-gamma", "arbitrary query", None, None, None)
+                .unwrap();
+        }
+        let after_pin_alpha: Vec<(String, String)> = state
+            .sessions
+            .launcher_mutate_state(LauncherStateMutation::PinRecommendation {
+                plugin_id: "over-alpha".to_string(),
+                feature_code: "act".to_string(),
+            })
+            .unwrap()
+            .pinned
+            .into_iter()
+            .map(|h| (h.plugin_id, h.feature_code))
+            .collect();
+        assert_eq!(
+            after_pin_alpha, before_rec_pinned,
+            "PinRecommendation must never mutate pinned_items"
+        );
+        let _ = state
+            .sessions
+            .launcher_mutate_state(LauncherStateMutation::PinRecommendation {
+                plugin_id: "over-beta".to_string(),
+                feature_code: "act".to_string(),
+            })
+            .unwrap();
+        let _ = state
+            .sessions
+            .launcher_mutate_state(LauncherStateMutation::MoveRecommendationToFront {
+                plugin_id: "over-beta".to_string(),
+                feature_code: "act".to_string(),
+            })
+            .unwrap();
+
+        let over_hits = {
+            let idx = state.search_index.read().unwrap();
+            let LauncherDecision::DeterministicResults { mut matches, .. } =
+                evaluate_launcher_input(&idx, "arbitrary query", false, false).unwrap()
+            else {
+                panic!("expected over hits");
+            };
+            state.sessions.enrich_and_rank_search_hits(&mut matches);
+            matches
+        };
+        let over_order: Vec<&str> = over_hits
+            .iter()
+            .filter(|h| h.match_type == "over")
+            .map(|h| h.plugin_id.as_str())
+            .collect();
+        assert_eq!(over_order, vec!["over-beta", "over-alpha", "over-gamma"]);
+        let alpha_hit = over_hits
+            .iter()
+            .find(|h| h.plugin_id == "over-alpha")
+            .unwrap();
+        assert_eq!(alpha_hit.icon_is_dark, None, "gradient icon stays None");
+        assert_eq!(alpha_hit.is_recommendation_pinned, Some(true));
+        assert_eq!(
+            alpha_hit.is_pinned, None,
+            "recommendation pin is isolated from pinned_items"
+        );
+
+        // Unpin over-beta -> falls back behind over-alpha (pinned) and over-gamma (use_count=3)
+        let _ = state
+            .sessions
+            .launcher_mutate_state(LauncherStateMutation::UnpinRecommendation {
+                plugin_id: "over-beta".to_string(),
+                feature_code: "act".to_string(),
+            })
+            .unwrap();
+        let after_unpin_hits = {
+            let idx = state.search_index.read().unwrap();
+            let LauncherDecision::DeterministicResults { mut matches, .. } =
+                evaluate_launcher_input(&idx, "arbitrary query", false, false).unwrap()
+            else {
+                panic!("expected over hits");
+            };
+            state.sessions.enrich_and_rank_search_hits(&mut matches);
+            matches
+        };
+        let over_order_after: Vec<&str> = after_unpin_hits
+            .iter()
+            .filter(|h| h.match_type == "over")
+            .map(|h| h.plugin_id.as_str())
+            .collect();
+        assert_eq!(
+            over_order_after,
+            vec!["over-alpha", "over-gamma", "over-beta"]
+        );
+
+        // Wire serde tag verification for LauncherStateMutation
+        let parsed_mut: LauncherStateMutation = serde_json::from_str(
+            r#"{"op":"reorder_pinned","items":[{"plugin_id":"a","feature_code":"b"}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            parsed_mut,
+            LauncherStateMutation::ReorderPinned { .. }
+        ));
+    }
+
+    #[test]
+    fn spec_016_r4_new_host_launcher_commands_enforce_guest_403_and_safe_reveal() {
+        let dir = TempDir::new().unwrap();
+        let state = AitoolsState::open(dir.path(), None, &[]).unwrap();
+
+        assert!(ensure_host_webview("main").is_ok());
+        assert!(ensure_host_webview("dsh").is_ok());
+        assert!(ensure_host_webview("plugin-guest")
+            .unwrap_err()
+            .contains("403"));
+
+        // reveal_in_finder must never accept arbitrary raw filesystem paths outside catalog/plugins.
+        assert!(!state
+            .sessions
+            .reveal_in_finder("system-apps", "/etc/passwd")
+            .unwrap());
+        assert!(!state
+            .sessions
+            .reveal_in_finder("unknown-plugin", "missing-feature")
+            .unwrap());
+
+        let default_toml = include_str!("../permissions/default.toml");
+        let guest_toml = include_str!("../permissions/guest-sandbox.toml");
+        for cmd in [
+            "launcher-home-sections",
+            "launcher-mutate-state",
+            "reveal-in-finder",
+        ] {
+            assert!(default_toml.contains(&format!("allow-{cmd}")));
+            assert!(!guest_toml.contains(cmd));
+        }
     }
 }

@@ -170,6 +170,12 @@ pub enum LaunchResult {
         placeholder: Option<String>,
         /// Initial items pushed by `onPluginEnter` / `callbackSetList`.
         items: Vec<ListItem>,
+        /// Optional resolved plugin icon URI for the in-place search box tag.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plugin_icon: Option<String>,
+        /// Whether `plugin_icon` is a pure-color monochrome icon (`Some(is_dark)`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plugin_icon_is_dark: Option<bool>,
     },
     /// Headless preload feature completed execution without opening a window.
     ExecutedHeadless {
@@ -231,6 +237,89 @@ pub struct SelectListResult {
     /// Updated list items if the plugin navigated to a nested list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub items: Option<Vec<ListItem>>,
+}
+
+/// Canonical `(plugin_id, feature_code)` identifier pair for launcher home sections and mutations (`SPEC-016-R2`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LauncherItemRef {
+    /// Owning plugin or catalog identifier (for example, `"system-apps"` or `"clipboard-history"`).
+    pub plugin_id: String,
+    /// Feature code within the plugin, or `"app:<Name>"` for system applications.
+    pub feature_code: String,
+}
+
+/// Zero-query launcher home sections returned by `plugin:aitools|launcher_home_sections` (`SPEC-016-R2`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HomeSectionsResponse {
+    /// Recently launched items (most recent first, capped at 36).
+    pub recent: Vec<LauncherHit>,
+    /// Pinned home items displayed in `已固定`.
+    pub pinned: Vec<LauncherHit>,
+    /// Curated home items matching `featured_home_items(limit)`.
+    pub featured: Vec<LauncherHit>,
+}
+
+/// Host-only launcher state mutation dispatched via `plugin:aitools|launcher_mutate_state` (`SPEC-016-R2`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum LauncherStateMutation {
+    /// Pins `(plugin_id, feature_code)` to `已固定`.
+    Pin {
+        /// Owning plugin or catalog identifier.
+        plugin_id: String,
+        /// Target feature code.
+        feature_code: String,
+    },
+    /// Unpins `(plugin_id, feature_code)` from `已固定`.
+    Unpin {
+        /// Owning plugin or catalog identifier.
+        plugin_id: String,
+        /// Target feature code.
+        feature_code: String,
+    },
+    /// Replaces the persisted `已固定` order after drag-and-drop reordering.
+    ReorderPinned {
+        /// Ordered list of pinned item references.
+        items: Vec<LauncherItemRef>,
+    },
+    /// Removes `(plugin_id, feature_code)` from `最近使用` and records exclusion until relaunched.
+    RemoveRecent {
+        /// Owning plugin or catalog identifier.
+        plugin_id: String,
+        /// Target feature code.
+        feature_code: String,
+    },
+    /// Pins `(plugin_id, feature_code)` inside `匹配推荐` (`over`) without altering `已固定`.
+    PinRecommendation {
+        /// Owning plugin or catalog identifier.
+        plugin_id: String,
+        /// Target feature code.
+        feature_code: String,
+    },
+    /// Unpins `(plugin_id, feature_code)` from `匹配推荐` (`over`).
+    UnpinRecommendation {
+        /// Owning plugin or catalog identifier.
+        plugin_id: String,
+        /// Target feature code.
+        feature_code: String,
+    },
+    /// Moves an already-pinned recommendation to the front (`index = 0`) of `匹配推荐`.
+    MoveRecommendationToFront {
+        /// Owning plugin or catalog identifier.
+        plugin_id: String,
+        /// Target feature code.
+        feature_code: String,
+    },
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HostLauncherState {
+    pub(crate) recent_history: Vec<LauncherItemRef>,
+    pub(crate) pinned_items: Vec<LauncherItemRef>,
+    pub(crate) pinned_initialized: bool,
+    pub(crate) recommendation_pinned: Vec<LauncherItemRef>,
+    pub(crate) usage_stats: HashMap<(String, String), u64>,
+    pub(crate) removed_recent_keys: HashSet<(String, String)>,
 }
 
 /// Summary returned by `plugin:aitools|sync_ztools_dir` (`SPEC-016-R1`).
@@ -770,6 +859,8 @@ pub struct PluginSessionManager {
     pub(crate) window_flag_hints: Mutex<HashMap<String, (bool, bool)>>,
     pub(crate) active_ai_aborts: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub(crate) clipboard_history: Mutex<Vec<ClipboardHistoryItem>>,
+    pub(crate) launcher_state: Mutex<HostLauncherState>,
+    pub(crate) icon_analysis_cache: Mutex<HashMap<String, Option<bool>>>,
     pub(crate) node_compat_gap_count: AtomicU64,
     pub(crate) session_seq: AtomicU64,
 }
@@ -795,6 +886,7 @@ impl PluginSessionManager {
             .build()
             .unwrap_or_default();
         let execution_mode = resolve_env_execution_mode();
+        let initial_launcher_state = crate::session_ops::load_host_launcher_state(&deps.storage);
         let manager = Arc::new(Self {
             self_weak: Mutex::new(Weak::new()),
             storage: deps.storage,
@@ -820,6 +912,8 @@ impl PluginSessionManager {
             window_flag_hints: Mutex::new(HashMap::new()),
             active_ai_aborts: Mutex::new(HashMap::new()),
             clipboard_history: Mutex::new(Vec::new()),
+            launcher_state: Mutex::new(initial_launcher_state),
+            icon_analysis_cache: Mutex::new(HashMap::new()),
             node_compat_gap_count: AtomicU64::new(0),
             session_seq: AtomicU64::new(0),
         });
@@ -1123,6 +1217,13 @@ impl PluginSessionManager {
     /// and popular macOS/desktop apps (`SPEC-016-R1`, `SPEC-017-R3`).
     #[must_use]
     pub fn featured_home_items(&self, limit: usize) -> Vec<LauncherHit> {
+        let _ = self.ensure_pinned_seeded();
+        let mut out = self.featured_home_items_raw(limit);
+        self.enrich_hits(&mut out);
+        out
+    }
+
+    pub(crate) fn featured_home_items_raw(&self, limit: usize) -> Vec<LauncherHit> {
         let cap = limit.clamp(1, 54);
         let platform = current_ztools_platform();
 
@@ -1204,6 +1305,11 @@ impl PluginSessionManager {
                     match_type: "featured".to_string(),
                     confidence: 1.0,
                     explain,
+                    icon_is_dark: None,
+                    target_path: Some(app.path.clone()),
+                    is_pinned: None,
+                    is_recommendation_pinned: None,
+                    use_count: None,
                 });
             }
         }
@@ -1250,6 +1356,127 @@ impl PluginSessionManager {
                 .max(1);
         }
         out
+    }
+
+    /// Computes ~9 balanced curated item references for initial one-time `已固定` seeding.
+    pub(crate) fn curated_pinned_seed_candidates(&self) -> Vec<LauncherItemRef> {
+        let mut candidates = Vec::with_capacity(9);
+        let mut seen: HashSet<(String, String)> = HashSet::with_capacity(9);
+        let platform = current_ztools_platform();
+        let mut map_local_icon = |local_path: &Path| -> Option<String> {
+            if local_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
+            {
+                None
+            } else {
+                self.mounts.register_icon(local_path)
+            }
+        };
+
+        let mut builtin_refs = Vec::new();
+        let mut ztools_refs = Vec::new();
+        if let Ok(plugins) = self.loaded_plugins.read() {
+            let mut by_builtin: HashMap<&str, &LoadedPlugin> = HashMap::new();
+            let mut others: Vec<&LoadedPlugin> = Vec::new();
+            for plugin in plugins.values() {
+                if let Some(pos) = CURATED_BUILTIN_ORDER.iter().position(|id| *id == plugin.id) {
+                    by_builtin.insert(CURATED_BUILTIN_ORDER[pos], plugin);
+                } else {
+                    others.push(plugin);
+                }
+            }
+            for builtin_id in CURATED_BUILTIN_ORDER {
+                if let Some(plugin) = by_builtin.get(builtin_id) {
+                    if let Some(hit) = plugin_primary_hit(plugin, platform, &mut map_local_icon) {
+                        builtin_refs.push(LauncherItemRef {
+                            plugin_id: hit.plugin_id,
+                            feature_code: hit.feature_code,
+                        });
+                    }
+                }
+            }
+            let mut other_sorted: Vec<(bool, String, LauncherItemRef)> = Vec::new();
+            for plugin in others {
+                if let Some(hit) = plugin_primary_hit(plugin, platform, &mut map_local_icon) {
+                    other_sorted.push((
+                        hit.icon.is_none(),
+                        hit.label.to_ascii_lowercase(),
+                        LauncherItemRef {
+                            plugin_id: hit.plugin_id,
+                            feature_code: hit.feature_code,
+                        },
+                    ));
+                }
+            }
+            other_sorted.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+            ztools_refs.extend(other_sorted.into_iter().map(|(_, _, r)| r));
+        }
+
+        let mut app_refs = Vec::new();
+        if let Ok(apps) = self.app_catalog.read() {
+            let mut ranked: Vec<(usize, bool, String, &LauncherApp)> = Vec::new();
+            for app in apps.values() {
+                ranked.push((
+                    popular_app_rank(app),
+                    app.icon_path.is_none(),
+                    app.name.to_ascii_lowercase(),
+                    app,
+                ));
+            }
+            ranked.sort_by(|a, b| {
+                a.0.cmp(&b.0)
+                    .then_with(|| a.1.cmp(&b.1))
+                    .then_with(|| a.2.cmp(&b.2))
+            });
+            for (_, _, _, app) in ranked {
+                app_refs.push(LauncherItemRef {
+                    plugin_id: "system-apps".to_string(),
+                    feature_code: format!("app:{}", app.name),
+                });
+            }
+        }
+
+        let mut push_ref = |r: LauncherItemRef, out: &mut Vec<LauncherItemRef>| {
+            if out.len() >= 9 {
+                return;
+            }
+            if seen.insert((r.plugin_id.clone(), r.feature_code.clone())) {
+                out.push(r);
+            }
+        };
+
+        let mut b_iter = builtin_refs.into_iter();
+        let mut z_iter = ztools_refs.into_iter();
+        let mut a_iter = app_refs.into_iter();
+
+        for r in b_iter.by_ref().take(3) {
+            push_ref(r, &mut candidates);
+        }
+        for r in z_iter.by_ref().take(3) {
+            push_ref(r, &mut candidates);
+        }
+        for r in a_iter.by_ref().take(3) {
+            push_ref(r, &mut candidates);
+        }
+        for r in b_iter.chain(z_iter).chain(a_iter) {
+            push_ref(r, &mut candidates);
+        }
+        if candidates.len() < 9 {
+            if let Ok(base) = self.base_features.read() {
+                for feat in base.iter() {
+                    push_ref(
+                        LauncherItemRef {
+                            plugin_id: feat.plugin_id.clone(),
+                            feature_code: feat.code.clone(),
+                        },
+                        &mut candidates,
+                    );
+                }
+            }
+        }
+        candidates
     }
 
     /// Returns a loaded plugin descriptor by ID, if registered.
@@ -1674,6 +1901,11 @@ where
         match_type: "featured".to_string(),
         confidence: 1.0,
         explain: description,
+        icon_is_dark: None,
+        target_path: Some(plugin.root_dir.to_string_lossy().into_owned()),
+        is_pinned: None,
+        is_recommendation_pinned: None,
+        use_count: None,
     })
 }
 

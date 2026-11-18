@@ -6,6 +6,9 @@ Default permissions for the aitools Tauri plugin
 
 - `allow-search-features`
 - `allow-featured-home-items`
+- `allow-launcher-home-sections`
+- `allow-launcher-mutate-state`
+- `allow-reveal-in-finder`
 - `allow-zero-query-suggestions`
 - `allow-launch-item`
 - `allow-search-list-mode`
@@ -377,6 +380,58 @@ Denies the launch_item command without any pre-configured scope.
 <tr>
 <td>
 
+`aitools:allow-launcher-home-sections`
+
+</td>
+<td>
+
+Enables the launcher_home_sections command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`aitools:deny-launcher-home-sections`
+
+</td>
+<td>
+
+Denies the launcher_home_sections command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`aitools:allow-launcher-mutate-state`
+
+</td>
+<td>
+
+Enables the launcher_mutate_state command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`aitools:deny-launcher-mutate-state`
+
+</td>
+<td>
+
+Denies the launcher_mutate_state command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `aitools:allow-resolve-hitl-step`
 
 </td>
@@ -396,6 +451,32 @@ Enables the resolve_hitl_step command without any pre-configured scope.
 <td>
 
 Denies the resolve_hitl_step command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`aitools:allow-reveal-in-finder`
+
+</td>
+<td>
+
+Enables the reveal_in_finder command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`aitools:deny-reveal-in-finder`
+
+</td>
+<td>
+
+Denies the reveal_in_finder command without any pre-configured scope.
 
 </td>
 </tr>

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-launcher-home-sections"
+description = "Enables the launcher_home_sections command without any pre-configured scope."
+commands.allow = ["launcher_home_sections"]
+
+[[permission]]
+identifier = "deny-launcher-home-sections"
+description = "Denies the launcher_home_sections command without any pre-configured scope."
+commands.deny = ["launcher_home_sections"]

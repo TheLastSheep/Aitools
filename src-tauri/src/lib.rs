@@ -559,10 +559,29 @@ mod tests {
             "featured-home-items",
             "featured_home_items",
             "resize_main_window",
+            "launcher-home-sections",
+            "launcher-mutate-state",
+            "reveal-in-finder",
+            "launcher_home_sections",
+            "launcher_mutate_state",
+            "reveal_in_finder",
         ] {
             assert!(
                 !guest_toml.contains(forbidden_new),
                 "guest-sandbox.toml must not grant {forbidden_new}"
+            );
+        }
+
+        let default_toml =
+            include_str!("../../crates/tauri-plugin-aitools/permissions/default.toml");
+        for host_allowed in [
+            "allow-launcher-home-sections",
+            "allow-launcher-mutate-state",
+            "allow-reveal-in-finder",
+        ] {
+            assert!(
+                default_toml.contains(host_allowed),
+                "default.toml must grant {host_allowed}"
             );
         }
     }

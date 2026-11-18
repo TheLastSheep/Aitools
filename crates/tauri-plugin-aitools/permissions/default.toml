@@ -3,6 +3,9 @@ description = "Default permissions for the aitools Tauri plugin"
 permissions = [
   "allow-search-features",
   "allow-featured-home-items",
+  "allow-launcher-home-sections",
+  "allow-launcher-mutate-state",
+  "allow-reveal-in-finder",
   "allow-zero-query-suggestions",
   "allow-launch-item",
   "allow-search-list-mode",
