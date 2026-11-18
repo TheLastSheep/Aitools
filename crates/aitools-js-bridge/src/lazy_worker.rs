@@ -60,7 +60,7 @@ impl WorkerClient {
     fn send(&self, cmd: WorkerCmd) -> Result<()> {
         self.tx
             .lock()
-            .expect("quickjs worker tx mutex poisoned")
+            .map_err(|_| JsBridgeError::QuickJs("quickjs worker tx mutex poisoned".into()))?
             .send(cmd)
             .map_err(|_| JsBridgeError::QuickJs("quickjs worker thread exited".into()))
     }
@@ -154,6 +154,7 @@ const _: () = {
 };
 
 impl JsBridgeHost {
+    /// Creates an idle [`JsBridgeHost`] with no QuickJS worker thread spawned yet.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -192,13 +193,10 @@ impl JsBridgeHost {
     /// [`JsBridgeError::QuickJs`] if initializing or evaluating `preload_code` fails.
     pub fn activate_preload_source(&mut self, plugin_id: &str, preload_code: &str) -> Result<()> {
         let _span = info_span!("quickjs_cold_start", plugin_id = %plugin_id).entered();
-        if self.worker.is_none() {
-            self.worker = Some(WorkerClient::spawn()?);
-        }
-        let client = self
-            .worker
-            .as_ref()
-            .expect("worker initialized immediately above");
+        let client = match self.worker {
+            Some(ref client) => client,
+            None => self.worker.insert(WorkerClient::spawn()?),
+        };
         let (reply_tx, reply_rx) = mpsc::channel();
         client.send(WorkerCmd::Activate {
             plugin_id: plugin_id.to_string(),
@@ -236,16 +234,19 @@ impl JsBridgeHost {
             .map_err(|_| JsBridgeError::QuickJs("quickjs worker dropped reply".into()))?
     }
 
+    /// Returns the number of currently active QuickJS plugin contexts.
     #[must_use]
     pub fn active_worker_count(&self) -> usize {
         self.active_plugins.len()
     }
 
+    /// Returns `true` if `plugin_id` currently has an active QuickJS context.
     #[must_use]
     pub fn has_worker(&self, plugin_id: &str) -> bool {
         self.active_plugins.contains(plugin_id)
     }
 
+    /// Unloads the QuickJS context associated with `plugin_id`, if present.
     pub fn unload(&mut self, plugin_id: &str) {
         self.active_plugins.remove(plugin_id);
         if let Some(ref client) = self.worker {

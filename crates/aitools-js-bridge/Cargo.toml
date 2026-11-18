@@ -2,13 +2,22 @@
 name = "aitools-js-bridge"
 version = "1.0.0"
 edition = "2021"
-description = "Lazy rquickjs preload sandbox and frozen triple-global ZTools/uTools/aitools compatibility shim"
+description = "Lazy rquickjs preload fallback, CommonJS NodePreloadRuntime sidecar, and frozen ZTools/uTools/aitools compatibility shim"
 
 [dependencies]
 aitools-core = { path = "../aitools-core" }
 aitools-telemetry = { path = "../aitools-telemetry" }
+base64 = "0.22"
+dirs = "5"
+flate2 = "1"
+hex = "0.4"
+percent-encoding = "2"
 rquickjs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
+tempfile = "3"
 thiserror = { workspace = true }
 tracing = { workspace = true }
+url = "2"
+uuid = { version = "1", features = ["v4"] }

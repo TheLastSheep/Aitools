@@ -19,6 +19,7 @@ use crate::{JsBridgeError, Result};
 pub struct CallbackHandle(u64);
 
 impl CallbackHandle {
+    /// Returns the numeric identifier backing this callback handle.
     #[must_use]
     pub const fn as_u64(self) -> u64 {
         self.0
@@ -29,11 +30,15 @@ impl CallbackHandle {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListItem {
+    /// Primary title displayed in the launcher or list row.
     pub title: String,
+    /// Secondary descriptive subtitle for the row.
     #[serde(default)]
     pub description: String,
+    /// Optional icon URL, data URI, or relative asset path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// Arbitrary item payload forwarded back on selection.
     #[serde(default)]
     pub payload: Value,
 }
@@ -41,14 +46,19 @@ pub struct ListItem {
 /// Real-time `callbackSetList` event forwarded to the host Webview Channel (`SPEC-004-R2`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListPushEvent {
+    /// Active wake or invocation trace correlation identifier.
     pub trace_id: String,
+    /// Owning plugin identifier.
     pub plugin_id: String,
+    /// Opaque handle identifying the active list callback session.
     pub handle: CallbackHandle,
+    /// Batch of list items pushed by the plugin.
     pub items: Vec<ListItem>,
 }
 
 /// Callback sink invoked whenever QuickJS calls `callbackSetList`.
 pub trait ListPushSink: Send + Sync {
+    /// Delivers a pushed batch of [`ListItem`] values to the host consumer.
     fn push_list(&self, event: ListPushEvent);
 }
 
@@ -59,6 +69,11 @@ pub struct RecordingListSink {
 }
 
 impl RecordingListSink {
+    /// Returns a snapshot of all [`ListPushEvent`] records pushed into this sink.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     #[must_use]
     pub fn events(&self) -> Vec<ListPushEvent> {
         self.events
@@ -92,11 +107,17 @@ pub struct CallbackTable {
 }
 
 impl CallbackTable {
+    /// Creates an empty [`CallbackTable`].
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Registers `(plugin_id, feature_code, mode)` and issues a unique [`CallbackHandle`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     pub fn register(&self, plugin_id: &str, feature_code: &str, mode: &str) -> CallbackHandle {
         let id = CallbackHandle(self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
         self.entries
@@ -113,6 +134,11 @@ impl CallbackTable {
         id
     }
 
+    /// Looks up `(plugin_id, feature_code, mode)` associated with `handle`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     #[must_use]
     pub fn lookup(&self, handle: CallbackHandle) -> Option<(String, String, String)> {
         self.entries
@@ -122,6 +148,11 @@ impl CallbackTable {
             .map(|e| (e.plugin_id.clone(), e.feature_code.clone(), e.mode.clone()))
     }
 
+    /// Removes all callback registrations belonging to `plugin_id`, returning the count removed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     pub fn remove_plugin(&self, plugin_id: &str) -> usize {
         let mut map = self.entries.lock().expect("callback table mutex poisoned");
         let before = map.len();
