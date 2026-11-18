@@ -119,6 +119,12 @@ h1 {
   font-size: 14px;
 }
 
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
+}
+
 .btn {
   padding: 8px 14px;
   border-radius: 8px;

@@ -136,6 +136,12 @@ h1 {
   line-height: 1.55;
 }
 
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
+}
+
 .card-actions {
   display: flex;
   justify-content: flex-end;
