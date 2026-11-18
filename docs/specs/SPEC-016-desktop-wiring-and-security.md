@@ -12,6 +12,7 @@
   2. Bundled built-in plugins under `plugins/builtin/*` (resolving both packaged Tauri bundle resources and dev workspace paths cleanly);
   3. Installed / synced ZTools plugin directories (including `<home>/.aitools/plugins/ztools` and paths registered via `sync_ztools_dir`) in strict read-only compliance with `INV-ZTOOLS-IMMUTABLE` (`SPEC-015-R1`).
   - Manifest indexing MUST synthesize searchable `FeatureEntry` items for both v1 `plugin.json` `features[]` and v2 `aitools.manifest.json` manifests (using explicit `features[]` or deriving a default entry from `id`, `name`, `description`, and `ai_tools`).
+  - After startup indexing completes, `src-tauri` MUST retain the `TelemetryHandle`, emit a non-secret `tracing::info!` summary (`apps_indexed`, `plugins_indexed`, `plugin_features_indexed`; never logging raw secrets or clipboard contents per `INV-SEC-03`), rely on `RollingJsonlWriter` immediate per-record & `Drop` flushing, and explicitly flush telemetry on `"tray-quit"` and `RunEvent::Exit`.
   - `search_features` MUST return enriched `LauncherHit` items (`feature_code`, `plugin_id`, `label`, `plugin_name`, `description`, `icon`, `kind`, `score`, `match_type`, `confidence`, `explain`) and execute `FeatureSearchIndex` text/Pinyin/regex/`over` matching plus typed `files` / `img` clipboard rules when active context carries file paths or image payloads (`SPEC-005-R4`).
 
 ## 2. Canonical Execution Pipeline, 3-Tier Preload Sessions & Window Focus Guard
@@ -29,7 +30,7 @@
 
 - **SPEC-016-R3 (Real Wake Context, Tray Menu & `Focused(false)` Auto-Hide Guard):**
   - On global hotkey wake (`Alt+Space` and configurable `DoubleTapDetector`), `src-tauri` MUST capture real `PreFocusContext` (`app_name`, `bundle_id`, `window_title`, `selected_text` via Accessibility/AX or non-destructive fallback, `clipboard_preview`, `active_path`, `captured_at_ms`), assemble `ContextEnvelope`, and stream `WakePayload` over `tauri::ipc::Channel` before showing `main`.
-  - `src-tauri` MUST register a system tray icon (`tray-icon`) providing **Show Launcher**, **Developer Harness (DSH)**, and **Quit** actions so the app remains reachable even if global hotkey registration fails.
+  - `src-tauri` MUST register a system tray icon (`tray-icon`) providing **Show Launcher**, **Developer Harness (DSH)**, and **Quit** actions so the app remains reachable even if global hotkey registration fails. Only the `"main"` WebView is instantiated eagerly in `tauri.conf.json`; **Developer Harness (DSH)** (`"tray-dsh"` and DSH hotkey) MUST lazily construct (or show/focus) the standalone `"dsh"` `WebviewWindow` (`/#dsh`, `960x640`) on demand via `open_or_focus_dsh_window`, preserving `"dsh"` permissions in `capabilities/main-shell.json`.
   - `WindowEvent::Focused(false)` on `main` MUST hide the launcher window ONLY when no active HITL confirmation, window drag, or modal guard is active (`!focus_hide_suppressed`), preventing mid-approval dismissal.
 
 ## 3. Capability Splitting, Network Gating & `NodeCompatGap` Observability (`INV-SEC-01`, `INV-SEC-02`)

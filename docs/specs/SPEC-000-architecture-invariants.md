@@ -24,7 +24,7 @@ Dependencies MUST flow downward strictly in the following order. Circular crate 
 | Synchronous LMDB read/write (`aitools-sync://`) | <= 0.3 ms | <= 5 ms | `db_sync` |
 | QuickJS legacy `preload.js` cold start | <= 2 ms | <= 10 ms | `quickjs_cold_start` |
 | Wasm plugin instantiation (`wasm32-wasip2`) | <= 1 ms | <= 5 ms | `wasm_instantiate` |
-| Idle resident memory (RSS, no active plugins) | <= 32 MB | <= 45 MB | Process RSS |
+| Idle private process memory footprint (no active plugins) | <= 32 MiB | <= 45 MiB | Private process footprint (`phys_footprint` on macOS, `RssAnon` on Linux, Private Working Set on Windows — excluding OS-shared dyld cache / WebKit framework pages) |
 | Native desktop installer footprint (`.dmg` / `.msi` / `.exe` / `.deb`) | <= 14 MiB | <= 18 MiB | Release native installer |
 | Self-contained Linux `.AppImage` (with bundled `libwebkit2gtk-4.1` + GTK3) | <= 85 MiB | <= 95 MiB | Release AppImage bundle |
 

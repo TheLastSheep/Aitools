@@ -19,7 +19,7 @@
 
 - **Preload Tiers (`PreloadTier`):**
   1. `WebViewOnly` — Plugins without `"preload"` (or `development.preload`) spawn zero preload workers (`SPEC-008-R2`).
-  2. `QuickJsNodeCompat` (Primary) — In-process pure-Rust `rquickjs` (`0.8`) + Rust CommonJS loader & capability-scoped Node/Electron compatibility layer (`<= 16 MiB` heap, `<= 2 ms` P50 / `<= 10 ms` P99 `quickjs_cold_start` per `SPEC-000`).
+  2. `QuickJsNodeCompat` (Primary) — In-process pure-Rust `rquickjs` (`0.8`) + Rust CommonJS loader & capability-scoped Node/Electron compatibility layer (`<= 64 MiB` QuickJS heap ceiling accommodating large CommonJS bundles such as `xlsx.js`, `<= 2 ms` P50 / `<= 10 ms` P99 `quickjs_cold_start` per `SPEC-000`).
   3. `SystemNodeFallback` (Escape Hatch) — Out-of-process host `node` CommonJS sidecar (`NodePreloadRuntime`), NEVER bundled with `aitools` and invoked ONLY on explicit `JsBridgeError::NodeCompatGap` under `RustFirstWithFallback`.
 - **Execution Modes (`PreloadExecutionMode`):**
   - `PureRustOnly` — Strictly forbids spawning external `node`; returns `Err(JsBridgeError::NodeCompatGap { plugin_id, capability })` if a plugin requires an unimplemented native addon or V8 internal. Activated by `AITOOLS_PURE_RUST_PRELOAD=1` or explicit host configuration.
@@ -27,13 +27,13 @@
 
 - **SPEC-015-R2 (Tier 2 Primary In-Process `QuickJsNodeCompat` Runtime):** For any `legacy-compat` plugin declaring `"preload"` (or `development.preload`), `PreloadRuntime` MUST execute `QuickJsNodeCompat` (`crates/aitools-js-bridge/src/rust_node_compat.rs`, built on workspace `rquickjs = 0.8` without `llrt_modules` and adhering to `SPEC-000` crate DAG `aitools-core` + `aitools-telemetry` only) FIRST:
   1. **Non-Reentrant Native Host Boundary:** Rust native primitives (`__aitools_native_node_op(op, json_args)`) and host bridge calls (`__aitools_host_bridge_op(domain, json_args)`) exposed into `rquickjs::Context` MUST return plain Rust/JSON strings synchronously back to JS without recursively calling `ctx.eval` inside host callbacks.
-  2. **CommonJS Module System:** Provide `require`, `require.resolve`, `require.cache`, and the standard `(function(exports, require, module, __filename, __dirname) { ... })` module wrapper, resolving:
+  2. **CommonJS Module System:** Provide `require`, `require.resolve`, `require.cache`, `require('module')` (`builtinModules`, `createRequire`, `_load`, `_initPaths`, `_nodeModulePaths`, `globalPaths`), and the standard `(function(exports, require, module, __filename, __dirname) { ... })` module wrapper, resolving:
      - Read-only relative files (`./*`, `../*` with `.js`, `.cjs`, `.json`, `/index.js`, `/index.cjs`);
-     - `<plugin_dir>/node_modules/<pkg>` using `package.json` `main` / `exports` fields without mutating `node_modules`.
+     - `<plugin_dir>/node_modules/<pkg>` (walking parent `node_modules` up to `<plugin_dir>`) and `Module.globalPaths` / `NODE_PATH` entries strictly bounded inside `<plugin_dir>` using `package.json` `main` / `exports` fields without mutating `node_modules`.
   3. **Rust-Backed Node & Electron Built-ins (`node:*` and bare specifiers):**
      - `electron`: `clipboard`, `nativeImage`, `shell`, `ipcRenderer`, `screen`, `dialog` routed through `HostBridgeHandler`;
      - `fs`, `fs/promises`, `original-fs`: capability-gated by `PreloadCapabilities::allow_fs` (`INV-ZTOOLS-IMMUTABLE` enforced on plugin bundles);
-     - `path`, `path/posix`, `path/win32`, `os`;
+     - `path`, `path/posix`, `path/win32`, `os` (including cross-platform `os.networkInterfaces()` enumerating all active IPv4/IPv6 interfaces via `ifconfig` on macOS/BSD, `ip -o addr` on Linux, and UDP probe fallback);
      - `crypto`: SHA-256, SHA-512, MD5, SHA-1, HMAC, `randomUUID`, `randomBytes`;
      - `buffer` and global `Buffer`;
      - `url`, `querystring`, `util`, `events`, `stream`, `timers`, `readline`, `zlib` (via `flate2`), `assert`, `string_decoder`, `process`;
@@ -78,9 +78,9 @@
   - `dbStorage` (`setItem`, `getItem`, `removeItem`) and `dbCryptoStorage` (`setItem`, `getItem`, `removeItem`).
 
 - **SPEC-015-R6 (Complete ZTools Lifecycle, SubInput, OS, Display & AI Parity):** `TRIPLE_GLOBAL_SHIM_JS`, `HostBridgeHandler`, and `aitools-sync://<plugin_id>/<op>` MUST implement:
-  - **Lifecycle & SubInput:** `onPluginEnter`, `onPluginReady`, `onPluginOut`, `onPluginDetach`, `onMainPush`, `setSubInput(onChange, placeholder?, isFocus?)`, `setSubInputValue(text)`, `removeSubInput()`, `subInputFocus()`, `subInputBlur()`, `subInputSelect()`, `redirect(label, payload)`, `outPlugin(isKill?)`, `hideMainWindow(isRestore?)`, `showMainWindow()`, `setExpendHeight(height)`.
+  - **Lifecycle & SubInput:** `onPluginEnter`, `onPluginReady`, `onPluginOut`, `onPluginDetach`, `onPluginAttach`, `onMainPush`, `setSubInput(onChange, placeholder?, isFocus?)`, `setSubInputValue(text)`, `removeSubInput()`, `subInputFocus()`, `subInputBlur()`, `subInputSelect()`, `redirect(label, payload)`, `outPlugin(isKill?)`, `hideMainWindow(isRestore?)` (returning a resolved `Promise<boolean>`), `hideMainWindowTypeString(text)`, `showMainWindow()`, `setExpendHeight(height)`.
   - **Clipboard & Paths:** `clipboard/copyText`, `clipboard/copyImage`, `clipboard/copyFile`, `clipboard/getCopyedFiles`, `clipboard/readText`, `clipboard/readImage`, `system/getPath`, `system/getPathForFile`, `system/getFileIcon`, `system/readCurrentFolderPath`, `system/readCurrentBrowserUrl`.
-  - **System, Shell & Notifications:** `system/getAppName`, `system/getAppVersion`, `system/getNativeId`, `isDev`, `isMacOs` (`isMacOS`), `isWindows`, `isLinux`, `system/isDarkColors`, `system/getThemeInfo`, `shell/openExternal` (`shellOpenExternal`), `shell/openPath` (`shellOpenPath`), `shell/showItemInFolder` (`shellShowItemInFolder`), `shell/beep` (`shellBeep`), `notification/show` (`showNotification`).
+  - **System, Shell & Notifications:** `system/getAppName`, `system/getAppVersion`, `system/getNativeId`, `isDev`, `isMacOs` (`isMacOS`), `isWindows`, `isLinux`, `system/isDarkColors`, `system/getThemeInfo`, `shell: { openExternal, openPath, showItemInFolder, beep }` (mutable namespace object attached prior to `Object.freeze`), `shell/openExternal` (`shellOpenExternal`), `shell/openPath` (`shellOpenPath`), `shell/showItemInFolder` (`shellShowItemInFolder`), `shell/beep` (`shellBeep`), `notification/show` (`showNotification`).
   - **Screen, Dialogs & Input Simulation:** `system/screenCapture`, `dialog/showOpenDialog`, `dialog/showSaveDialog`, `system/simulateKeyboardTap`, `system/simulateMouseMove`, `system/simulateMouseClick`, `display/getPrimaryDisplay`, `display/getAllDisplays`, `display/getDisplayNearestPoint`, `display/getCursorScreenPoint`, `display/dipToScreenPoint`, `display/screenToDipPoint`.
   - **Dynamic Features:** `features/getFeatures`, `features/setFeature`, `features/removeFeature`, `features/registerMainPush`.
   - **ZTools AI Parity:** `window.ztools.ai(options, streamCallback?)` returning a Promise-compatible request handle with `.abort()` (`ai/chat`, `ai/abort`), and `window.ztools.allAiModels()` (`ai/allModels`), routed through the host `ModelBroker` (`SPEC-016-R6`, `SPEC-007-R4`).
