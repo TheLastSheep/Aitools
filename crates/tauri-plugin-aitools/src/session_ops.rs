@@ -705,23 +705,18 @@ impl PluginSessionManager {
                 Ok(json!(true))
             }
             "hideMainWindow" => {
-                if let Ok(mut flags) = self.window_flag_hints.lock() {
-                    let entry = flags.entry(plugin_id.to_string()).or_insert((false, false));
-                    entry.1 = true;
-                }
-                if let Some(sid) = self
-                    .active_list_session_by_plugin
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.get(plugin_id).cloned())
-                {
-                    if let Ok(mut sessions) = self.list_sessions.lock() {
-                        if let Some(sess) = sessions.get_mut(&sid) {
-                            sess.hide_main = true;
-                        }
-                    }
-                }
+                self.mark_main_hidden(plugin_id);
                 let _ = ctl.hide_main_window();
+                Ok(json!(true))
+            }
+            "hideMainWindowTypeString" => {
+                let text = payload
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                self.mark_main_hidden(plugin_id);
+                let _ = ctl.hide_main_window();
+                let _ = self.clipboard().set_text(text);
                 Ok(json!(true))
             }
             "showMainWindow" => {
@@ -740,6 +735,25 @@ impl PluginSessionManager {
             _ => Err(SyncOpError::not_found(format!(
                 "unknown window op: window/{sub}"
             ))),
+        }
+    }
+
+    fn mark_main_hidden(&self, plugin_id: &str) {
+        if let Ok(mut flags) = self.window_flag_hints.lock() {
+            let entry = flags.entry(plugin_id.to_string()).or_insert((false, false));
+            entry.1 = true;
+        }
+        if let Some(sid) = self
+            .active_list_session_by_plugin
+            .lock()
+            .ok()
+            .and_then(|g| g.get(plugin_id).cloned())
+        {
+            if let Ok(mut sessions) = self.list_sessions.lock() {
+                if let Some(sess) = sessions.get_mut(&sid) {
+                    sess.hide_main = true;
+                }
+            }
         }
     }
 

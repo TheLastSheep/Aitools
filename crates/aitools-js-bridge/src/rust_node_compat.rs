@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
-use std::net::UdpSocket;
+use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,7 +32,7 @@ use crate::shim::TRIPLE_GLOBAL_SHIM_JS;
 use crate::{JsBridgeError, Result};
 
 const RUST_NODE_COMPAT_BOOTSTRAP_JS: &str = include_str!("rust_node_compat_bootstrap.js");
-const QUICKJS_HEAP_BYTES: usize = 16 * 1024 * 1024;
+const QUICKJS_HEAP_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_RANDOM_BYTES: usize = 16 * 1024 * 1024;
 
@@ -750,10 +750,52 @@ fn native_resolve_module(args: &Value, plugin_dir: &Path) -> String {
         cursor = dir.parent();
     }
 
+    // Check Module.globalPaths / NODE_PATH entries bounded inside canonical plugin_dir.
+    for extra_dir in collect_extra_module_paths(args, plugin_dir) {
+        let candidate = extra_dir.join(request);
+        if let Some(resolved) = try_resolve_file_or_dir(request, &candidate, plugin_dir) {
+            return resolved;
+        }
+    }
+
     json_err_with_code(
         &format!("Cannot find module '{request}'"),
         "MODULE_NOT_FOUND",
     )
+}
+
+fn collect_extra_module_paths(args: &Value, plugin_dir: &Path) -> Vec<PathBuf> {
+    let mut raw_entries: Vec<String> = Vec::new();
+    if let Some(arr) = args.get("modulePaths").and_then(Value::as_array) {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                raw_entries.push(s.to_string());
+            }
+        }
+    }
+    if let Some(node_path) = args.get("nodePath").and_then(Value::as_str) {
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        for s in node_path.split(sep) {
+            raw_entries.push(s.to_string());
+        }
+    }
+    let mut out = Vec::new();
+    for entry in raw_entries {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let p = Path::new(trimmed);
+        let candidate = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            plugin_dir.join(p)
+        };
+        if !has_parent_escape(plugin_dir, &candidate) && !out.contains(&candidate) {
+            out.push(candidate);
+        }
+    }
+    out
 }
 
 fn has_parent_escape(plugin_dir: &Path, candidate: &Path) -> bool {
@@ -1152,7 +1194,292 @@ fn native_os_info(plugin_dir: &Path) -> String {
     }))
 }
 
-fn probe_network_interfaces() -> Value {
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    test
+))]
+fn ipv4_netmask_and_prefix(token: &str) -> (String, u32) {
+    if let Some(hex_str) = token
+        .strip_prefix("0x")
+        .or_else(|| token.strip_prefix("0X"))
+    {
+        if let Ok(bits) = u32::from_str_radix(hex_str, 16) {
+            return (Ipv4Addr::from(bits).to_string(), bits.count_ones());
+        }
+    }
+    if let Ok(ip) = token.parse::<Ipv4Addr>() {
+        let bits = u32::from(ip);
+        return (ip.to_string(), bits.count_ones());
+    }
+    ("255.255.255.0".to_string(), 24)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn ipv4_netmask_from_prefix(prefix: u32) -> String {
+    let bits = if prefix == 0 {
+        0
+    } else if prefix >= 32 {
+        u32::MAX
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    Ipv4Addr::from(bits).to_string()
+}
+
+fn ipv6_netmask_from_prefix(prefix: u8) -> String {
+    let bits = if prefix == 0 {
+        0
+    } else if prefix >= 128 {
+        u128::MAX
+    } else {
+        u128::MAX << (128 - prefix)
+    };
+    Ipv6Addr::from(bits).to_string()
+}
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    test
+))]
+fn has_ifconfig_flag(header_rest: &str, flag: &str) -> bool {
+    let Some(start) = header_rest.find('<') else {
+        return false;
+    };
+    let Some(end) = header_rest[start + 1..].find('>') else {
+        return false;
+    };
+    header_rest[start + 1..start + 1 + end]
+        .split(',')
+        .any(|f| f.trim() == flag)
+}
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    test
+))]
+fn parse_ifconfig_output(raw: &str) -> serde_json::Map<String, Value> {
+    struct IfaceAccum {
+        name: String,
+        is_up: bool,
+        is_loopback: bool,
+        mac: String,
+        addrs: Vec<Value>,
+    }
+
+    fn flush_iface(acc: Option<IfaceAccum>, out: &mut serde_json::Map<String, Value>) {
+        let Some(iface) = acc else {
+            return;
+        };
+        if !iface.is_up || iface.addrs.is_empty() {
+            return;
+        }
+        let mac = iface.mac;
+        let entries: Vec<Value> = iface
+            .addrs
+            .into_iter()
+            .map(|mut item| {
+                if let Some(obj) = item.as_object_mut() {
+                    obj.insert("mac".to_string(), Value::String(mac.clone()));
+                }
+                item
+            })
+            .collect();
+        if let Some(Value::Array(existing)) = out.get_mut(&iface.name) {
+            existing.extend(entries);
+        } else {
+            out.insert(iface.name, Value::Array(entries));
+        }
+    }
+
+    let mut out = serde_json::Map::new();
+    let mut current: Option<IfaceAccum> = None;
+
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if !line.starts_with(char::is_whitespace) {
+            if let Some((iface_name, rest)) = line.split_once(':') {
+                flush_iface(current.take(), &mut out);
+                let name = iface_name.trim().to_string();
+                let is_up = has_ifconfig_flag(rest, "UP");
+                let is_loopback = has_ifconfig_flag(rest, "LOOPBACK") || name == "lo0";
+                current = Some(IfaceAccum {
+                    name,
+                    is_up,
+                    is_loopback,
+                    mac: "00:00:00:00:00:00".to_string(),
+                    addrs: Vec::new(),
+                });
+                continue;
+            }
+        }
+
+        let Some(ref mut iface) = current else {
+            continue;
+        };
+        if !iface.is_up {
+            continue;
+        }
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.len() < 2 {
+            continue;
+        }
+        match tokens[0] {
+            "ether" => {
+                if tokens[1].contains(':') {
+                    iface.mac = tokens[1].to_string();
+                }
+            }
+            "inet" => {
+                if let Ok(ipv4) = tokens[1].parse::<Ipv4Addr>() {
+                    let mask_idx = tokens.iter().position(|t| *t == "netmask");
+                    let (netmask, prefix) = match mask_idx.and_then(|i| tokens.get(i + 1)) {
+                        Some(tok) => ipv4_netmask_and_prefix(tok),
+                        None if ipv4.is_loopback() => ("255.0.0.0".to_string(), 8),
+                        None => ("255.255.255.0".to_string(), 24),
+                    };
+                    let internal = iface.is_loopback || ipv4.is_loopback();
+                    iface.addrs.push(json!({
+                        "address": ipv4.to_string(),
+                        "netmask": netmask,
+                        "family": "IPv4",
+                        "mac": "",
+                        "internal": internal,
+                        "cidr": format!("{ipv4}/{prefix}"),
+                    }));
+                }
+            }
+            "inet6" => {
+                let raw_ip = tokens[1].split('%').next().unwrap_or(tokens[1]);
+                if let Ok(ipv6) = raw_ip.parse::<Ipv6Addr>() {
+                    let prefix = tokens
+                        .iter()
+                        .position(|t| *t == "prefixlen")
+                        .and_then(|i| tokens.get(i + 1))
+                        .and_then(|s| s.parse::<u8>().ok())
+                        .unwrap_or(64);
+                    let scopeid = tokens
+                        .iter()
+                        .position(|t| *t == "scopeid")
+                        .and_then(|i| tokens.get(i + 1))
+                        .and_then(|s| {
+                            if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))
+                            {
+                                u32::from_str_radix(hex, 16).ok()
+                            } else {
+                                s.parse::<u32>().ok()
+                            }
+                        })
+                        .unwrap_or(0);
+                    let internal = iface.is_loopback || ipv6.is_loopback();
+                    iface.addrs.push(json!({
+                        "address": ipv6.to_string(),
+                        "netmask": ipv6_netmask_from_prefix(prefix),
+                        "family": "IPv6",
+                        "mac": "",
+                        "internal": internal,
+                        "cidr": format!("{ipv6}/{prefix}"),
+                        "scopeid": scopeid,
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+    flush_iface(current, &mut out);
+    out
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_ip_addr_output(
+    raw: &str,
+    mac_lookup: &dyn Fn(&str) -> Option<String>,
+) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    for line in raw.lines() {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.len() < 4 {
+            continue;
+        }
+        let if_index = tokens[0].trim_end_matches(':').parse::<u32>().unwrap_or(0);
+        let iface = tokens[1]
+            .split('@')
+            .next()
+            .unwrap_or(tokens[1])
+            .trim()
+            .to_string();
+        if iface.is_empty() {
+            continue;
+        }
+        let mac = mac_lookup(&iface).unwrap_or_else(|| "00:00:00:00:00:00".to_string());
+        let is_scope_host = tokens.windows(2).any(|w| w[0] == "scope" && w[1] == "host");
+
+        if let Some(pos) = tokens.iter().position(|t| *t == "inet") {
+            let Some(cidr_tok) = tokens.get(pos + 1) else {
+                continue;
+            };
+            let (addr_str, prefix_str) = cidr_tok.split_once('/').unwrap_or((cidr_tok, "32"));
+            if let Ok(ipv4) = addr_str.parse::<Ipv4Addr>() {
+                let prefix = prefix_str.parse::<u32>().unwrap_or(32).min(32);
+                let internal = iface == "lo" || ipv4.is_loopback() || is_scope_host;
+                let entry = json!({
+                    "address": ipv4.to_string(),
+                    "netmask": ipv4_netmask_from_prefix(prefix),
+                    "family": "IPv4",
+                    "mac": mac,
+                    "internal": internal,
+                    "cidr": format!("{ipv4}/{prefix}"),
+                });
+                match out.get_mut(&iface) {
+                    Some(Value::Array(arr)) => arr.push(entry),
+                    _ => {
+                        out.insert(iface.clone(), Value::Array(vec![entry]));
+                    }
+                }
+            }
+        } else if let Some(pos) = tokens.iter().position(|t| *t == "inet6") {
+            let Some(cidr_tok) = tokens.get(pos + 1) else {
+                continue;
+            };
+            let (addr_str, prefix_str) = cidr_tok.split_once('/').unwrap_or((cidr_tok, "128"));
+            let addr_clean = addr_str.split('%').next().unwrap_or(addr_str);
+            if let Ok(ipv6) = addr_clean.parse::<Ipv6Addr>() {
+                let prefix = prefix_str.parse::<u8>().unwrap_or(128).min(128);
+                let internal = iface == "lo" || ipv6.is_loopback() || is_scope_host;
+                let is_scope_link = tokens.windows(2).any(|w| w[0] == "scope" && w[1] == "link");
+                let scopeid = if is_scope_link { if_index } else { 0 };
+                let entry = json!({
+                    "address": ipv6.to_string(),
+                    "netmask": ipv6_netmask_from_prefix(prefix),
+                    "family": "IPv6",
+                    "mac": mac,
+                    "internal": internal,
+                    "cidr": format!("{ipv6}/{prefix}"),
+                    "scopeid": scopeid,
+                });
+                match out.get_mut(&iface) {
+                    Some(Value::Array(arr)) => arr.push(entry),
+                    _ => {
+                        out.insert(iface.clone(), Value::Array(vec![entry]));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn probe_network_interfaces_udp_fallback() -> Value {
     let mut map = serde_json::Map::new();
     map.insert(
         "lo0".to_string(),
@@ -1188,6 +1515,46 @@ fn probe_network_interfaces() -> Value {
         }
     }
     Value::Object(map)
+}
+
+fn probe_network_interfaces() -> Value {
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    {
+        if let Ok(output) = Command::new("ifconfig").output() {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                let parsed = parse_ifconfig_output(&text);
+                if !parsed.is_empty() {
+                    return Value::Object(parsed);
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(output) = Command::new("ip").args(["-o", "addr"]).output() {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                let parsed = parse_ip_addr_output(&text, &|iface| {
+                    std::fs::read_to_string(format!("/sys/class/net/{iface}/address"))
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                });
+                if !parsed.is_empty() {
+                    return Value::Object(parsed);
+                }
+            }
+        }
+    }
+
+    probe_network_interfaces_udp_fallback()
 }
 
 fn native_crypto_hash(args: &Value) -> String {
@@ -1997,5 +2364,67 @@ mod tests {
             hex::encode(sha1_digest(b"abc")),
             "a9993e364706816aba3e25717850c26c9cd0d89d"
         );
+    }
+
+    #[test]
+    fn parses_multi_nic_ifconfig_and_ip_addr_outputs() {
+        let ifconfig_sample = "\
+lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
+\tinet 127.0.0.1 netmask 0xff000000
+\tinet6 ::1 prefixlen 128
+en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+\tether 5e:a0:52:66:2c:89
+\tinet6 fe80::1037:697d:bf58:5598%en0 prefixlen 64 secured scopeid 0xf
+\tinet 172.18.16.42 netmask 0xffffff00 broadcast 172.18.16.255
+nan0: flags=8822<BROADCAST,SMART,SIMPLEX,MULTICAST> mtu 1500
+\tinet 169.254.1.2 netmask 0xffff0000
+en6: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+\tether 58:ef:68:13:4c:f5
+\tinet 172.18.5.212 netmask 0xffffff00 broadcast 172.18.5.255
+utun4: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1500
+\tinet 10.251.1.1 --> 10.251.1.1 netmask 0xffffffff
+";
+        let parsed = parse_ifconfig_output(ifconfig_sample);
+        assert!(parsed.contains_key("lo0"));
+        assert!(parsed.contains_key("en0"));
+        assert!(parsed.contains_key("en6"));
+        assert!(parsed.contains_key("utun4"));
+        assert!(
+            !parsed.contains_key("nan0"),
+            "down interface must be excluded"
+        );
+
+        let en0 = parsed["en0"].as_array().unwrap();
+        assert_eq!(en0.len(), 2);
+        assert_eq!(en0[0]["family"], "IPv6");
+        assert_eq!(en0[0]["address"], "fe80::1037:697d:bf58:5598");
+        assert_eq!(en0[0]["netmask"], "ffff:ffff:ffff:ffff::");
+        assert_eq!(en0[0]["scopeid"], 15);
+        assert_eq!(en0[0]["mac"], "5e:a0:52:66:2c:89");
+        assert_eq!(en0[1]["family"], "IPv4");
+        assert_eq!(en0[1]["address"], "172.18.16.42");
+        assert_eq!(en0[1]["netmask"], "255.255.255.0");
+        assert_eq!(en0[1]["cidr"], "172.18.16.42/24");
+        assert_eq!(en0[1]["internal"], false);
+
+        let ip_sample = "\
+1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever
+1: lo    inet6 ::1/128 scope host \\       valid_lft forever preferred_lft forever
+2: eth0    inet 192.168.1.50/24 brd 192.168.1.255 scope global dynamic eth0\\       valid_lft 86000sec preferred_lft 86000sec
+3: wlan0@if7    inet 10.0.0.25/16 scope global wlan0\\       valid_lft forever preferred_lft forever
+2: eth0    inet6 fe80::1234/64 scope link \\       valid_lft forever preferred_lft forever
+";
+        let linux_parsed = parse_ip_addr_output(ip_sample, &|iface| match iface {
+            "eth0" => Some("aa:bb:cc:dd:ee:ff".to_string()),
+            _ => None,
+        });
+        assert!(linux_parsed.contains_key("lo"));
+        assert!(linux_parsed.contains_key("eth0"));
+        assert!(linux_parsed.contains_key("wlan0"));
+        assert_eq!(linux_parsed["eth0"][0]["address"], "192.168.1.50");
+        assert_eq!(linux_parsed["eth0"][0]["netmask"], "255.255.255.0");
+        assert_eq!(linux_parsed["eth0"][0]["mac"], "aa:bb:cc:dd:ee:ff");
+        assert_eq!(linux_parsed["eth0"][1]["scopeid"], 2);
+        assert_eq!(linux_parsed["lo"][0]["internal"], true);
     }
 }

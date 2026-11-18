@@ -236,6 +236,7 @@ pub const TRIPLE_GLOBAL_SHIM_JS: &str = r#"(function() {
         ready: [],
         out: [],
         detach: [],
+        attach: [],
         mainPush: { cb: null, selectCb: null },
         subInput: { onChange: null },
         themeChange: [],
@@ -273,6 +274,12 @@ pub const TRIPLE_GLOBAL_SHIM_JS: &str = r#"(function() {
             }
             if (eventName === 'pluginDetach') {
                 for (const cb of lifecycle.detach.slice()) {
+                    cb(arg1);
+                }
+                return true;
+            }
+            if (eventName === 'pluginAttach') {
+                for (const cb of lifecycle.attach.slice()) {
                     cb(arg1);
                 }
                 return true;
@@ -586,6 +593,21 @@ pub const TRIPLE_GLOBAL_SHIM_JS: &str = r#"(function() {
             return Boolean(syncOrFallback('system/isMacOs', {}, () => platformName() === 'darwin'));
         }
 
+        const shellNamespace = {
+            openExternal(url) {
+                return syncCall('shell/openExternal', { url: url == null ? '' : String(url) });
+            },
+            openPath(fullPath) {
+                return syncCall('shell/openPath', { path: fullPath == null ? '' : String(fullPath) });
+            },
+            showItemInFolder(fullPath) {
+                return syncCall('shell/showItemInFolder', { path: fullPath == null ? '' : String(fullPath) });
+            },
+            beep() {
+                return syncCall('shell/beep', {});
+            },
+        };
+
         const api = {
             __pluginId: initialPluginId,
             db,
@@ -618,6 +640,11 @@ pub const TRIPLE_GLOBAL_SHIM_JS: &str = r#"(function() {
             onPluginDetach(cb) {
                 if (typeof cb === 'function') {
                     lifecycle.detach.push(cb);
+                }
+            },
+            onPluginAttach(cb) {
+                if (typeof cb === 'function') {
+                    lifecycle.attach.push(cb);
                 }
             },
             onMainPush(cb, selectCb) {
@@ -682,8 +709,18 @@ pub const TRIPLE_GLOBAL_SHIM_JS: &str = r#"(function() {
                 return syncCall('window/outPlugin', { isKill: Boolean(isKill) });
             },
             hideMainWindow(isRestorePreWindow) {
-                return syncCall('window/hideMainWindow', {
-                    isRestorePreWindow: isRestorePreWindow !== false,
+                try {
+                    const res = syncCall('window/hideMainWindow', {
+                        isRestorePreWindow: isRestorePreWindow !== false,
+                    });
+                    return Promise.resolve(res);
+                } catch (err) {
+                    return Promise.reject(err);
+                }
+            },
+            hideMainWindowTypeString(text) {
+                return syncCall('window/hideMainWindowTypeString', {
+                    text: text == null ? '' : String(text),
                 });
             },
             showMainWindow() {
@@ -792,20 +829,21 @@ pub const TRIPLE_GLOBAL_SHIM_JS: &str = r#"(function() {
             },
 
             // Shell & notifications
+            shell: shellNamespace,
             shellOpenExternal(url) {
-                return syncCall('shell/openExternal', { url: url == null ? '' : String(url) });
+                return shellNamespace.openExternal(url);
             },
             shellOpenPath(fullPath) {
-                return syncCall('shell/openPath', { path: fullPath == null ? '' : String(fullPath) });
+                return shellNamespace.openPath(fullPath);
             },
             shellShowItemInFolder(fullPath) {
-                return syncCall('shell/showItemInFolder', { path: fullPath == null ? '' : String(fullPath) });
+                return shellNamespace.showItemInFolder(fullPath);
             },
             shellShowItem(fullPath) {
-                return syncCall('shell/showItemInFolder', { path: fullPath == null ? '' : String(fullPath) });
+                return shellNamespace.showItemInFolder(fullPath);
             },
             shellBeep() {
-                return syncCall('shell/beep', {});
+                return shellNamespace.beep();
             },
             showNotification(body, clickFeatureCode) {
                 return syncCall('notification/show', {

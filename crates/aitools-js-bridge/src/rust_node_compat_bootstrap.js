@@ -1521,13 +1521,43 @@
   let activePluginDir = '';
   const moduleCache = Object.create(null);
 
+  function nodeModulePaths(from) {
+    const start = pathModule.resolve(String(from || currentCwd));
+    const rootLimit = activePluginDir ? pathModule.resolve(activePluginDir) : '';
+    const paths = [];
+    let cur = start;
+    while (cur) {
+      if (pathModule.basename(cur) !== 'node_modules') {
+        paths.push(pathModule.join(cur, 'node_modules'));
+      }
+      if (rootLimit && cur === rootLimit) {
+        break;
+      }
+      const parent = pathModule.dirname(cur);
+      if (!parent || parent === cur) {
+        break;
+      }
+      cur = parent;
+    }
+    return paths;
+  }
+
   function createRequire(parentFilename) {
+    function currentModulePaths() {
+      const mod = BUILTIN_MODULES.module;
+      return mod && Array.isArray(mod.globalPaths) ? mod.globalPaths : [];
+    }
+    function currentNodePathEnv() {
+      return processObj.env && processObj.env.NODE_PATH ? String(processObj.env.NODE_PATH) : '';
+    }
     function req(specifier) {
       const spec = String(specifier || '');
       const resolved = nativeCall('resolve_module', {
         request: spec,
         parentFilename: parentFilename || pathModule.join(activePluginDir || currentCwd, 'preload.js'),
         pluginDir: activePluginDir || currentCwd,
+        modulePaths: currentModulePaths(),
+        nodePath: currentNodePathEnv(),
       });
 
       if (resolved.kind === 'builtin') {
@@ -1544,7 +1574,7 @@
         filename,
         loaded: false,
         exports: {},
-        paths: [],
+        paths: nodeModulePaths(pathModule.dirname(filename)),
       };
       moduleCache[filename] = mod;
 
@@ -1584,6 +1614,8 @@
         request: String(specifier || ''),
         parentFilename: parentFilename || pathModule.join(activePluginDir || currentCwd, 'preload.js'),
         pluginDir: activePluginDir || currentCwd,
+        modulePaths: currentModulePaths(),
+        nodePath: currentNodePathEnv(),
       });
       return resolved.kind === 'builtin' ? resolved.name : resolved.filename;
     };
@@ -1592,9 +1624,21 @@
 
   BUILTIN_MODULES.module = {
     builtinModules: Object.keys(BUILTIN_MODULES),
+    globalPaths: [],
+    _nodeModulePaths: nodeModulePaths,
+    _initPaths: function() {
+      const raw = (processObj.env && processObj.env.NODE_PATH) ? String(processObj.env.NODE_PATH) : '';
+      const entries = raw.split(pathModule.delimiter).map((s) => s.trim()).filter(Boolean);
+      const merged = [];
+      for (const entry of entries) {
+        if (!merged.includes(entry)) merged.push(entry);
+      }
+      BUILTIN_MODULES.module.globalPaths = merged;
+    },
     createRequire,
     _load: (request, parent) => createRequire(parent && parent.filename ? parent.filename : '')(request),
   };
+  BUILTIN_MODULES.module._initPaths();
 
   // --- Introspection & Lifecycle Dispatch ---
   const FORBIDDEN_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor']);
@@ -1707,13 +1751,24 @@
   let nextSlotId = 1;
 
   function errorPayload(err) {
-    const msg = (err && err.message) ? String(err.message) : String(err);
+    const isObj = Boolean(err && typeof err === 'object');
+    const name = isObj && err.name ? String(err.name) : '';
+    const hasMsg = isObj && err.message !== undefined && err.message !== null;
+    const msg = hasMsg ? String(err.message) : String(err);
     const prefix = '__AITOOLS_NODE_COMPAT_GAP__:';
     if (msg.includes(prefix)) {
       const idx = msg.indexOf(prefix);
       return { ok: false, compatGap: msg.slice(idx + prefix.length), error: msg };
     }
-    return { ok: false, error: (err && err.stack) ? String(err.stack) : msg };
+    const header = name && msg ? `${name}: ${msg}` : (msg || name);
+    const stack = isObj && err.stack ? String(err.stack).trimEnd() : '';
+    if (!stack) {
+      return { ok: false, error: header };
+    }
+    if (header && !stack.includes(header)) {
+      return { ok: false, error: `${header}\n${stack}` };
+    }
+    return { ok: false, error: stack };
   }
 
   async function executeMethod(method, p) {

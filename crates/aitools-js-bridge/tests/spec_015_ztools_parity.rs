@@ -1131,6 +1131,7 @@ globalThis.XMLHttpRequest = class MockFullXHR {{
   ztools.onPluginEnter((a) => events.push(['enter', a.code]));
   ztools.onPluginOut((k) => events.push(['out', k]));
   ztools.onPluginDetach(() => events.push(['detach']));
+  ztools.onPluginAttach(() => events.push(['attach']));
   ztools.onMainPush((a) => [{{ text: a.payload }}], () => true);
 
   let subText = '';
@@ -1139,12 +1140,14 @@ globalThis.XMLHttpRequest = class MockFullXHR {{
   globalThis.__aitools_dispatch_lifecycle__('subInput', 'hello sub');
   globalThis.__aitools_dispatch_lifecycle__('pluginOut', true);
   globalThis.__aitools_dispatch_lifecycle__('pluginDetach', {{}});
+  globalThis.__aitools_dispatch_lifecycle__('pluginAttach', {{}});
 
   ztools.setSubInputValue('next');
   ztools.removeSubInput();
   ztools.redirect('other-plugin', 'payload');
   ztools.outPlugin(false);
-  ztools.hideMainWindow(true);
+  const hideRes = await ztools.hideMainWindow(true);
+  const typeRes = ztools.hideMainWindowTypeString('typed-text');
   ztools.showMainWindow();
   ztools.setExpendHeight(480);
 
@@ -1165,6 +1168,10 @@ globalThis.XMLHttpRequest = class MockFullXHR {{
   ztools.shellOpenExternal('https://example.com');
   ztools.shellOpenPath('/tmp');
   ztools.shellShowItemInFolder('/tmp/a.txt');
+  ztools.shell.openExternal('https://shell.example.com');
+  ztools.shell.openPath('/tmp/shell');
+  ztools.shell.showItemInFolder('/tmp/shell.txt');
+  ztools.shell.beep();
   ztools.showNotification('Done', 'feat-1');
 
   let capturedCb = '';
@@ -1227,6 +1234,8 @@ globalThis.XMLHttpRequest = class MockFullXHR {{
     models,
     browserUrl,
     folderPath,
+    hideRes,
+    typeRes,
     recordedOps: ops.map((o) => o.op),
   }}));
 }})().catch((e) => {{
@@ -1243,9 +1252,12 @@ globalThis.XMLHttpRequest = class MockFullXHR {{
             ["ready", "feat-1"],
             ["enter", "feat-1"],
             ["out", true],
-            ["detach"]
+            ["detach"],
+            ["attach"]
         ])
     );
+    assert_eq!(out["hideRes"], json!(true));
+    assert_eq!(out["typeRes"], json!(true));
     assert_eq!(out["subText"], json!("hello sub"));
     assert_eq!(out["copiedFiles"][0]["isFile"], json!(true));
     assert_eq!(out["copiedFiles"][1]["isDiractory"], json!(true));
@@ -1742,4 +1754,207 @@ window.capsApi = {
         assert_eq!(http_ops[0].1["url"], json!("https://example.invalid/api"));
         rt.shutdown().unwrap();
     }
+}
+
+#[test]
+fn spec_015_r2_and_r6_regressions_module_paths_64mb_heap_error_payload_nics_and_shim() {
+    let dir = TempDir::new().unwrap();
+    let plugin_dir = dir.path();
+
+    // 1. Module._initPaths() + _nodeModulePaths() + globalPaths + NODE_PATH resolution (`imgbatch` pattern)
+    let runtime_pkgs = plugin_dir
+        .join("runtime-packages")
+        .join("custom-img-helper");
+    std::fs::create_dir_all(&runtime_pkgs).unwrap();
+    std::fs::write(
+        runtime_pkgs.join("package.json"),
+        r#"{ "name": "custom-img-helper", "main": "index.js" }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        runtime_pkgs.join("index.js"),
+        "exports.resizeFactor = (n) => n * 2;",
+    )
+    .unwrap();
+
+    // 2. Large >16 MiB heap allocation & bundle stress test (`sqlmate` / `xlsx.js` OOM fix)
+    let large_filler = " ".repeat(1_500_000);
+    std::fs::write(
+        plugin_dir.join("large_bundle.js"),
+        format!(
+            "{large_filler}\nexports.allocateLarge = () => {{ const buf = Buffer.alloc(24 * 1024 * 1024, 0x41); return buf.length; }};\n"
+        ),
+    )
+    .unwrap();
+
+    std::fs::write(
+        plugin_dir.join("preload.js"),
+        r#"
+const Module = require('module');
+const path = require('path');
+const os = require('os');
+
+const runtimePackagesPath = path.join(__dirname, 'runtime-packages');
+const sep = path.delimiter;
+process.env.NODE_PATH = runtimePackagesPath + (process.env.NODE_PATH ? sep + process.env.NODE_PATH : '');
+Module._initPaths();
+const helper = require('custom-img-helper');
+const largeMod = require('./large_bundle.js');
+
+// `port-use` pattern: ztools is frozen, ztools.shell exists with openExternal/openPath/showItemInFolder/beep
+// and remains extensible so preload can attach `ztools.shell.exec`.
+window.ztools = window.ztools || {};
+window.ztools.shell = window.ztools.shell || {};
+window.ztools.shell.exec = (cmd) => 'exec:' + cmd;
+
+let attachFired = false;
+window.utools.onPluginAttach(() => { attachFired = true; });
+
+window.regressionApi = {
+  checkModule() {
+    return {
+      hasInitPaths: typeof Module._initPaths === 'function',
+      globalPaths: Module.globalPaths,
+      nodeModulePaths: Module._nodeModulePaths(__dirname),
+      helperResult: helper.resizeFactor(21),
+    };
+  },
+  checkLargeHeap() {
+    return largeMod.allocateLarge();
+  },
+  throwTypedError() {
+    throw new TypeError('missing required option xyz');
+  },
+  checkNetworkInterfaces() {
+    const nets = os.networkInterfaces();
+    const names = Object.keys(nets);
+    let totalEntries = 0;
+    let firstValid = false;
+    for (const name of names) {
+      for (const entry of nets[name]) {
+        totalEntries++;
+        if (entry.address && entry.netmask && entry.family && entry.cidr) {
+          firstValid = true;
+        }
+      }
+    }
+    return { names, totalEntries, firstValid };
+  },
+  async checkShimApis() {
+    const frozenTop = Object.isFrozen(window.ztools);
+    const sameShell = window.ztools.shell === window.utools.shell && window.ztools.shell === window.aitools.shell;
+    const shellTypes = [
+      typeof window.ztools.shell.openExternal,
+      typeof window.ztools.shell.openPath,
+      typeof window.ztools.shell.showItemInFolder,
+      typeof window.ztools.shell.beep,
+      typeof window.ztools.shell.exec,
+    ];
+    let thenCalled = false;
+    const hidePromise = window.ztools.hideMainWindow(true);
+    const isThenable = Boolean(hidePromise && typeof hidePromise.then === 'function');
+    await hidePromise.then(() => { thenCalled = true; });
+    const typedOk = window.ztools.hideMainWindowTypeString('hello-random-data');
+    window.ztools.shell.openExternal('https://example.org/shell');
+    window.ztools.shell.openPath('/tmp/demo');
+    window.ztools.shell.showItemInFolder('/tmp/demo/file.txt');
+    window.ztools.shell.beep();
+    globalThis.__aitools_dispatch_lifecycle__('pluginAttach', {});
+    return {
+      frozenTop,
+      sameShell,
+      shellTypes,
+      isThenable,
+      thenCalled,
+      typedOk,
+      execRes: window.ztools.shell.exec('lsof -i'),
+      attachFired,
+    };
+  },
+};
+"#,
+    )
+    .unwrap();
+
+    let rec = Arc::new(RecordingHostBridge::default());
+    let rt = PreloadRuntime::with_node_config(
+        PreloadExecutionMode::PureRustOnly,
+        PreloadCapabilities::all(),
+        NodeRuntimeConfig {
+            node_binary: Some(PathBuf::from("/nonexistent/node-must-not-spawn")),
+            startup_timeout: Duration::from_secs(2),
+            call_timeout: Duration::from_secs(5),
+        },
+        Arc::clone(&rec) as Arc<dyn HostBridgeHandler>,
+    );
+    rt.load("preload.js", "regression-plugin", plugin_dir)
+        .unwrap();
+    assert_eq!(rt.active_tier(), PreloadTier::QuickJsNodeCompat);
+
+    // 1. Module._initPaths / _nodeModulePaths / globalPaths / NODE_PATH resolve
+    let mod_res = rt
+        .invoke_window_prop("regressionApi.checkModule", &[])
+        .unwrap();
+    assert_eq!(mod_res["hasInitPaths"], json!(true));
+    assert_eq!(mod_res["helperResult"], json!(42));
+    assert!(mod_res["globalPaths"]
+        .as_array()
+        .is_some_and(|a| !a.is_empty()));
+    assert!(mod_res["nodeModulePaths"].as_array().is_some_and(|a| a
+        .iter()
+        .any(|p| p.as_str().is_some_and(|s| s.ends_with("node_modules")))));
+
+    // 2. >16 MiB QuickJS heap allocation succeeds cleanly (64 MiB ceiling)
+    let heap_len = rt
+        .invoke_window_prop("regressionApi.checkLargeHeap", &[])
+        .unwrap();
+    assert_eq!(heap_len, json!(24 * 1024 * 1024));
+
+    // 3. errorPayload preserves err.name AND err.message alongside stack
+    let err = rt
+        .invoke_window_prop("regressionApi.throwTypedError", &[])
+        .unwrap_err();
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("TypeError") && err_str.contains("missing required option xyz"),
+        "expected TypeError + message in error string, got: {err_str}"
+    );
+
+    // 4. os.networkInterfaces() returns valid interface structures
+    let net_res = rt
+        .invoke_window_prop("regressionApi.checkNetworkInterfaces", &[])
+        .unwrap();
+    assert!(net_res["totalEntries"].as_u64().unwrap_or(0) >= 1);
+    assert_eq!(net_res["firstValid"], json!(true));
+
+    // 5. hideMainWindow().then, hideMainWindowTypeString, onPluginAttach, and ztools.shell
+    let shim_res = rt
+        .invoke_window_prop("regressionApi.checkShimApis", &[])
+        .unwrap();
+    assert_eq!(shim_res["frozenTop"], json!(true));
+    assert_eq!(shim_res["sameShell"], json!(true));
+    assert_eq!(
+        shim_res["shellTypes"],
+        json!(["function", "function", "function", "function", "function"])
+    );
+    assert_eq!(shim_res["isThenable"], json!(true));
+    assert_eq!(shim_res["thenCalled"], json!(true));
+    assert_eq!(shim_res["typedOk"], json!(true));
+    assert_eq!(shim_res["execRes"], json!("exec:lsof -i"));
+    assert_eq!(shim_res["attachFired"], json!(true));
+
+    let win_ops = rec.snapshot_window_ops();
+    assert!(win_ops.iter().any(|(op, _)| op == "window/hideMainWindow"));
+    assert!(win_ops.iter().any(|(op, p)| {
+        op == "window/hideMainWindowTypeString" && p["text"] == json!("hello-random-data")
+    }));
+    let shell_ops = rec.snapshot_shell_ops();
+    assert!(shell_ops.iter().any(|(op, _)| op == "shell/openExternal"));
+    assert!(shell_ops.iter().any(|(op, _)| op == "shell/openPath"));
+    assert!(shell_ops
+        .iter()
+        .any(|(op, _)| op == "shell/showItemInFolder"));
+    assert!(shell_ops.iter().any(|(op, _)| op == "shell/beep"));
+
+    rt.shutdown().unwrap();
 }
