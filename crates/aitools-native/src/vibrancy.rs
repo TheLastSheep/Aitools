@@ -4,7 +4,7 @@ use raw_window_handle::HasWindowHandle;
 
 use crate::Result;
 
-/// Applies a subtle HUD/popover vibrancy material to a native window on macOS.
+/// Applies a ZTools-matched translucent HUD vibrancy material (`FullScreenUI`, `10px` radius) to a native window on macOS.
 ///
 /// On non-macOS platforms this is a safe no-op returning `Ok(())`.
 ///
@@ -17,9 +17,9 @@ pub fn apply_hud_vibrancy<W: HasWindowHandle>(window: &W) -> Result<()> {
     {
         window_vibrancy::apply_vibrancy(
             window,
-            window_vibrancy::NSVisualEffectMaterial::HudWindow,
-            Some(window_vibrancy::NSVisualEffectState::FollowsWindowActiveState),
-            Some(14.0),
+            window_vibrancy::NSVisualEffectMaterial::FullScreenUI,
+            Some(window_vibrancy::NSVisualEffectState::Active),
+            Some(10.0),
         )
         .map_err(|err| crate::NativeError::Window(err.to_string()))?;
     }
