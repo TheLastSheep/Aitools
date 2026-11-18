@@ -483,9 +483,8 @@ impl RollingJsonlWriter {
         self.writer.write_all(b"\n")?;
         self.current_bytes += (line.len() + 1) as u64;
 
-        if matches!(record.level.as_str(), "ERROR" | "FATAL") {
-            self.writer.flush()?;
-        }
+        // Flush every record immediately so startup/INFO spans are durable before SIGTERM or doctor reads.
+        self.writer.flush()?;
         Ok(())
     }
 
@@ -526,6 +525,12 @@ impl RollingJsonlWriter {
             }
         }
         Ok(())
+    }
+}
+
+impl Drop for RollingJsonlWriter {
+    fn drop(&mut self) {
+        let _ = self.writer.flush();
     }
 }
 
@@ -1406,6 +1411,51 @@ mod tests {
         assert!(
             slowest.starts_with("slow_child_op:"),
             "unexpected slowest_subspan: {slowest}"
+        );
+    }
+
+    #[test]
+    fn spec_010_r1_info_records_flush_immediately_to_jsonl_without_error() {
+        let dir = TempDir::new().unwrap();
+        let handle = test_handle(&dir);
+
+        let layer = ChronologicalJsonlLayer {
+            handle: Arc::clone(&handle),
+        };
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                apps_indexed = 12usize,
+                plugins_indexed = 8usize,
+                plugin_features_indexed = 16usize,
+                "aitools desktop startup indexing complete"
+            );
+        });
+
+        // Read directly from the JSONL file on disk without calling handle.flush() or emitting ERROR.
+        let jsonl_files: Vec<PathBuf> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
+            .collect();
+        assert_eq!(jsonl_files.len(), 1);
+        let raw = fs::read_to_string(&jsonl_files[0]).unwrap();
+        assert!(
+            !raw.is_empty(),
+            "JSONL log file must be non-empty immediately after INFO event"
+        );
+        let parsed: LogRecord =
+            serde_json::from_str(raw.lines().next().expect("at least one JSONL line")).unwrap();
+        assert_eq!(parsed.level, "INFO");
+        assert_eq!(parsed.msg, "aitools desktop startup indexing complete");
+        assert_eq!(
+            parsed.fields.get("apps_indexed"),
+            Some(&Value::Number(12.into()))
+        );
+        assert_eq!(
+            parsed.fields.get("plugins_indexed"),
+            Some(&Value::Number(8.into()))
         );
     }
 }
