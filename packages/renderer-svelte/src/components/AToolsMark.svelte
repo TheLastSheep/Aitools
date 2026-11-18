@@ -4,15 +4,26 @@
     label?: string;
     circular?: boolean;
     streaming?: boolean;
+    aiState?: "idle" | "sending" | "receiving";
   };
 
-  let { size = "badge", label = "", circular = false, streaming = false }: Props = $props();
+  let {
+    size = "badge",
+    label = "",
+    circular = false,
+    streaming = false,
+    aiState = "idle",
+  }: Props = $props();
+
+  const resolvedAiState = $derived<"idle" | "sending" | "receiving">(
+    aiState !== "idle" ? aiState : streaming ? "sending" : "idle",
+  );
 </script>
 
 <span
   class={`atools-mark ${size}`}
   class:circular
-  class:streaming
+  class:streaming={resolvedAiState !== "idle"}
   aria-hidden={!label}
   aria-label={label || undefined}
   role={label ? "img" : undefined}
@@ -20,8 +31,16 @@
   <svg viewBox="0 0 128 128" aria-hidden="true" focusable="false">
     <path d="M25 99 55 22c1.7-4.4 3.8-6.5 8.1-6.5 4.1 0 6.4 2.1 8.1 6.5L103 99H82L75 80H53l-7 19H25Zm34-36h10l-5-14-5 14Z" />
   </svg>
-  {#if streaming}
-    <span class="ai-ring" aria-hidden="true"></span>
+  {#if resolvedAiState !== "idle"}
+    <span class="ai-animation-layer" aria-hidden="true">
+      <span class="ai-mask"></span>
+      <span class="ai-text">AI</span>
+      {#if resolvedAiState === "sending"}
+        <span class="ai-ripple-container"></span>
+      {:else if resolvedAiState === "receiving"}
+        <span class="ai-pulse-container"></span>
+      {/if}
+    </span>
   {/if}
 </span>
 
@@ -67,23 +86,112 @@
     fill: #ffffff;
   }
 
-  .ai-ring {
+  .ai-animation-layer {
     position: absolute;
-    inset: -3px;
+    inset: 0;
+    width: 100%;
+    height: 100%;
     border-radius: 50%;
-    border: 2px solid rgba(52, 211, 153, 0.24);
-    border-top-color: var(--accent);
-    border-right-color: var(--accent);
     pointer-events: none;
-    animation: avatar-ring-spin 0.85s linear infinite;
+    z-index: 2;
   }
 
-  @keyframes avatar-ring-spin {
-    from {
-      transform: rotate(0deg);
+  .ai-mask {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.88);
+    z-index: 1;
+  }
+
+  :global(:root[data-atools-theme="dark"]) .ai-mask {
+    background: rgba(24, 26, 29, 0.86);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :global(:root:not([data-atools-theme="light"])) .ai-mask {
+      background: rgba(24, 26, 29, 0.86);
     }
-    to {
-      transform: rotate(360deg);
+  }
+
+  .ai-text {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent-text);
+    z-index: 3;
+    letter-spacing: 0.4px;
+    line-height: 1;
+  }
+
+  .ai-ripple-container,
+  .ai-pulse-container {
+    position: absolute;
+    inset: -2px;
+    display: inline-block;
+    z-index: 2;
+  }
+
+  .ai-ripple-container::before,
+  .ai-ripple-container::after {
+    content: "";
+    box-sizing: border-box;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    border: 2px solid var(--accent);
+    position: absolute;
+    inset: 0;
+    animation: animloader-sending 2s linear infinite;
+    animation-fill-mode: backwards;
+  }
+
+  .ai-ripple-container::after {
+    animation-delay: 1s;
+  }
+
+  .ai-pulse-container::before,
+  .ai-pulse-container::after {
+    content: "";
+    box-sizing: border-box;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    border: 2px solid var(--accent);
+    position: absolute;
+    inset: 0;
+    animation: animloader-receiving 2s linear infinite;
+    animation-fill-mode: backwards;
+  }
+
+  .ai-pulse-container::after {
+    animation-delay: 1s;
+  }
+
+  @keyframes animloader-sending {
+    0% {
+      transform: scale(0.25);
+      opacity: 1;
+    }
+    100% {
+      transform: scale(1.18);
+      opacity: 0;
+    }
+  }
+
+  @keyframes animloader-receiving {
+    0% {
+      transform: scale(1.18);
+      opacity: 0;
+    }
+    100% {
+      transform: scale(0.25);
+      opacity: 1;
     }
   }
 </style>

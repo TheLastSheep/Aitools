@@ -5,6 +5,7 @@
     SyncZtoolsResult,
     ThemePreference,
   } from "../lib/ipc";
+  import type { SearchViewMode } from "../stores/launcher.svelte";
 
   let {
     logs,
@@ -16,7 +17,9 @@
     syncPending = false,
     lastSyncResult = null,
     themePreference = "system",
+    searchViewMode = "aggregate",
     onChangeTheme,
+    onChangeSearchViewMode,
     onRefresh,
     onToggleFault,
     onSyncPlugins,
@@ -31,7 +34,9 @@
     syncPending?: boolean;
     lastSyncResult?: SyncZtoolsResult | null;
     themePreference?: ThemePreference;
+    searchViewMode?: SearchViewMode;
     onChangeTheme?: (next: ThemePreference) => void;
+    onChangeSearchViewMode?: (next: SearchViewMode) => void;
     onRefresh: () => void;
     onToggleFault: (key: keyof FaultInjectionConfig) => void;
     onSyncPlugins?: () => void;
@@ -74,6 +79,21 @@
         placeholder="Filter trace_id..."
         bind:value={traceFilter}
       />
+      {#if onChangeSearchViewMode}
+        <div class="theme-group" role="group" aria-label="Search view mode">
+          {#each [["aggregate", "Aggregate"], ["list", "List"]] as [modeVal, text] (modeVal)}
+            <button
+              type="button"
+              class="theme-opt"
+              class:active={searchViewMode === modeVal}
+              aria-pressed={searchViewMode === modeVal}
+              onclick={() => onChangeSearchViewMode(modeVal as SearchViewMode)}
+            >
+              {text}
+            </button>
+          {/each}
+        </div>
+      {/if}
       {#if onChangeTheme}
         <div class="theme-group" role="group" aria-label="Theme preference">
           {#each [["system", "Auto"], ["light", "Light"], ["dark", "Dark"]] as [pref, text] (pref)}

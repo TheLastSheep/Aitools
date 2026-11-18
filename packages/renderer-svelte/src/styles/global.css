@@ -4,8 +4,6 @@
   --bg-secondary: rgba(255, 255, 255, 0.78);
   --bg-tertiary: rgba(232, 234, 237, 0.92);
   --bg-elevated: #ffffff;
-  --bg-hover: rgba(0, 0, 0, 0.045);
-  --bg-selected: rgba(4, 120, 87, 0.08);
   --control-bg: rgba(0, 0, 0, 0.04);
 
   --text-primary: #1f2328;
@@ -17,10 +15,17 @@
   --shell-border: rgba(0, 0, 0, 0.10);
 
   --accent: #047857;
+  --primary-color: var(--accent);
   --accent-hover: #065f46;
   --accent-text: #065f46;
   --accent-foreground: #ffffff;
   --accent-subtle: rgba(4, 120, 87, 0.08);
+
+  --hover-bg: color-mix(in srgb, var(--accent) 12%, white);
+  --active-bg: color-mix(in srgb, var(--accent) 20%, white);
+  --primary-light-bg: color-mix(in srgb, var(--accent), white 80%);
+  --bg-hover: var(--hover-bg);
+  --bg-selected: var(--active-bg);
 
   --highlight: #c2410c;
   --highlight-selected: #9a3412;
@@ -71,8 +76,6 @@
     --bg-secondary: rgba(58, 60, 63, 0.88);
     --bg-tertiary: rgba(56, 58, 62, 0.94);
     --bg-elevated: #36383c;
-    --bg-hover: rgba(255, 255, 255, 0.07);
-    --bg-selected: rgba(52, 211, 153, 0.10);
     --control-bg: rgba(255, 255, 255, 0.06);
 
     --text-primary: #f3f4f6;
@@ -84,10 +87,17 @@
     --shell-border: rgba(255, 255, 255, 0.12);
 
     --accent: #34d399;
+    --primary-color: var(--accent);
     --accent-hover: #6ee7b7;
     --accent-text: #6ee7b7;
     --accent-foreground: #052e16;
     --accent-subtle: rgba(52, 211, 153, 0.14);
+
+    --hover-bg: color-mix(in srgb, var(--accent) 5%, #303133);
+    --active-bg: color-mix(in srgb, var(--accent) 14%, #303133);
+    --primary-light-bg: color-mix(in srgb, var(--accent) 14%, #303133);
+    --bg-hover: var(--hover-bg);
+    --bg-selected: var(--active-bg);
 
     --highlight: #fb923c;
     --highlight-selected: #fdba74;
@@ -105,6 +115,28 @@
 
     --shadow-shell: none;
   }
+
+  :root:not([data-atools-theme="light"]) ::selection {
+    background: color-mix(in srgb, var(--accent) 40%, #303133);
+    color: var(--text-primary);
+  }
+
+  :root:not([data-atools-theme="light"]) ::-moz-selection {
+    background: color-mix(in srgb, var(--accent) 40%, #303133);
+    color: var(--text-primary);
+  }
+
+  :root:not([data-atools-theme="light"]) ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  :root:not([data-atools-theme="light"]) ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.2);
+  }
+
+  :root:not([data-atools-theme="light"]) ::-webkit-scrollbar-thumb:active {
+    background: rgba(255, 255, 255, 0.35);
+  }
 }
 
 :root[data-atools-theme="light"] {
@@ -112,8 +144,6 @@
   --bg-secondary: rgba(255, 255, 255, 0.78);
   --bg-tertiary: rgba(232, 234, 237, 0.92);
   --bg-elevated: #ffffff;
-  --bg-hover: rgba(0, 0, 0, 0.045);
-  --bg-selected: rgba(4, 120, 87, 0.08);
   --control-bg: rgba(0, 0, 0, 0.04);
 
   --text-primary: #1f2328;
@@ -125,10 +155,17 @@
   --shell-border: rgba(0, 0, 0, 0.10);
 
   --accent: #047857;
+  --primary-color: var(--accent);
   --accent-hover: #065f46;
   --accent-text: #065f46;
   --accent-foreground: #ffffff;
   --accent-subtle: rgba(4, 120, 87, 0.08);
+
+  --hover-bg: color-mix(in srgb, var(--accent) 12%, white);
+  --active-bg: color-mix(in srgb, var(--accent) 20%, white);
+  --primary-light-bg: color-mix(in srgb, var(--accent), white 80%);
+  --bg-hover: var(--hover-bg);
+  --bg-selected: var(--active-bg);
 
   --highlight: #c2410c;
   --highlight-selected: #9a3412;
@@ -152,8 +189,6 @@
   --bg-secondary: rgba(58, 60, 63, 0.88);
   --bg-tertiary: rgba(56, 58, 62, 0.94);
   --bg-elevated: #36383c;
-  --bg-hover: rgba(255, 255, 255, 0.07);
-  --bg-selected: rgba(52, 211, 153, 0.10);
   --control-bg: rgba(255, 255, 255, 0.06);
 
   --text-primary: #f3f4f6;
@@ -165,10 +200,17 @@
   --shell-border: rgba(255, 255, 255, 0.12);
 
   --accent: #34d399;
+  --primary-color: var(--accent);
   --accent-hover: #6ee7b7;
   --accent-text: #6ee7b7;
   --accent-foreground: #052e16;
   --accent-subtle: rgba(52, 211, 153, 0.14);
+
+  --hover-bg: color-mix(in srgb, var(--accent) 5%, #303133);
+  --active-bg: color-mix(in srgb, var(--accent) 14%, #303133);
+  --primary-light-bg: color-mix(in srgb, var(--accent) 14%, #303133);
+  --bg-hover: var(--hover-bg);
+  --bg-selected: var(--active-bg);
 
   --highlight: #fb923c;
   --highlight-selected: #fdba74;
@@ -187,10 +229,46 @@
   --shadow-shell: none;
 }
 
+:root[data-atools-theme="dark"] ::selection {
+  background: color-mix(in srgb, var(--accent) 40%, #303133);
+  color: var(--text-primary);
+}
+
+:root[data-atools-theme="dark"] ::-moz-selection {
+  background: color-mix(in srgb, var(--accent) 40%, #303133);
+  color: var(--text-primary);
+}
+
+:root[data-atools-theme="dark"] ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+:root[data-atools-theme="dark"] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+:root[data-atools-theme="dark"] ::-webkit-scrollbar-thumb:active {
+  background: rgba(255, 255, 255, 0.35);
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 35%, white);
+  color: var(--text-primary);
+}
+
+::-moz-selection {
+  background: color-mix(in srgb, var(--accent) 35%, white);
+  color: var(--text-primary);
+}
+
 * {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
+}
+
+html {
+  height: 100%;
 }
 
 html,
@@ -205,6 +283,10 @@ body {
   line-height: 1.5;
   overflow: hidden;
   scrollbar-width: none;
+}
+
+body {
+  min-height: 100%;
 }
 
 html::-webkit-scrollbar,
@@ -264,20 +346,28 @@ code,
   font-variant-numeric: tabular-nums;
 }
 
-/* Scrollbar */
+/* ZTools-matched 6px scrollbar opacity ramp */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
+
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
 ::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
-  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.08);
+  border-radius: 3px;
+  transition: background 0.2s ease;
 }
+
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--text-tertiary);
+  background: rgba(0, 0, 0, 0.15);
+}
+
+::-webkit-scrollbar-thumb:active {
+  background: rgba(0, 0, 0, 0.25);
 }
 
 /* Animations */

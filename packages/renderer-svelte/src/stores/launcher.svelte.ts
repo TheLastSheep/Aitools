@@ -1,5 +1,4 @@
 import {
-  featuredHomeItems,
   fetchDshLogs,
   fetchZeroQuerySuggestions,
   hideMainWindow,
@@ -7,7 +6,10 @@ import {
   isDshRoute,
   isTauriRuntime,
   launchItem,
+  launcherHomeSections,
+  mutateLauncherState,
   resolveHitlStep,
+  revealInFinder,
   searchFeatures,
   searchListMode,
   selectListItem,
@@ -19,24 +21,42 @@ import {
   type ContextChip,
   type DagEvent,
   type FaultInjectionConfig,
+  type HomeSectionsResponse,
   type LauncherHit,
   type LauncherMode,
+  type LauncherStateMutation,
   type ListItem,
   type ListPushEvent,
   type ListSession,
   type LogRecord,
+  type PastedFileItem,
   type QuickAgentAction,
   type ResolvedTheme,
   type SyncZtoolsResult,
   type ThemePreference,
 } from "../lib/ipc";
+import {
+  clampGridCoords,
+  hitIdentityKey,
+  stepGridSelection,
+  type NavigationGridRow,
+} from "../lib/launcherUi";
+
+export type SearchViewMode = "aggregate" | "list";
 
 const THEME_STORAGE_KEY = "aitools:theme";
+const SEARCH_MODE_STORAGE_KEY = "aitools:search-mode";
 
 function readInitialThemePref(): ThemePreference {
   if (typeof localStorage === "undefined") return "system";
   const saved = localStorage.getItem(THEME_STORAGE_KEY);
   return saved === "light" || saved === "dark" || saved === "system" ? saved : "system";
+}
+
+function readInitialSearchViewMode(): SearchViewMode {
+  if (typeof localStorage === "undefined") return "aggregate";
+  const saved = localStorage.getItem(SEARCH_MODE_STORAGE_KEY);
+  return saved === "list" ? "list" : "aggregate";
 }
 
 function resolveOsTheme(): ResolvedTheme {
@@ -57,25 +77,48 @@ export function isTier2Risk(riskTier: string | undefined): boolean {
   return normalized.includes("tier2") || normalized.includes("destructive");
 }
 
+function filterHitsBySubstring(source: LauncherHit[], filterText: string): LauncherHit[] {
+  const q = filterText.trim().toLowerCase();
+  if (!q) return source;
+  return source.filter((hit) => {
+    const fields = [hit.label, hit.plugin_name, hit.description, hit.feature_code, hit.explain];
+    return fields.some((f) => (f || "").toLowerCase().includes(q));
+  });
+}
+
 export function createLauncherStore() {
   let dshStandalone = $state(isDshRoute());
   let mode = $state<LauncherMode>("search");
+  let searchViewMode = $state<SearchViewMode>(readInitialSearchViewMode());
   let enteredAgentByAt = $state(false);
   let query = $state("");
   let traceId = $state("wake-0");
   let chips = $state<ContextChip[]>([]);
+  let pastedText = $state<string | null>(null);
+  let pastedFiles = $state<PastedFileItem[] | null>(null);
+  let pastedBaseHits = $state<LauncherHit[]>([]);
   let suggestions = $state<QuickAgentAction[]>([]);
-  let homeItems = $state<LauncherHit[]>([]);
+
+  // Home sections
+  let recentItems = $state<LauncherHit[]>([]);
+  let pinnedItems = $state<LauncherHit[]>([]);
+  let featuredItems = $state<LauncherHit[]>([]);
+  let recentExpanded = $state(false);
+  let pinnedExpanded = $state(false);
   let homeExpanded = $state(false);
+  let searchResultsExpanded = $state(false);
+  let bestMatchesExpanded = $state(false);
+  let recommendationsExpanded = $state(false);
+
   let hasWoken = $state(false);
-  let homeSelectedIndex = $state(-1);
+  let selectedRow = $state(0);
+  let selectedCol = $state(0);
   let lastWakeTraceId = "";
   let hits = $state<LauncherHit[]>([]);
-  let selectedIndex = $state(0);
   let searchLoading = $state(false);
   let searchError = $state<string | null>(null);
 
-  // List-mode state (headless ZTools plugins)
+  // List-mode state (headless ZTools plugins, hosted in single top search bar)
   let listSession = $state<ListSession | null>(null);
   let subInput = $state("");
   let listSelectedIndex = $state(0);
@@ -128,6 +171,10 @@ export function createLauncherStore() {
     query = next;
   }
 
+  function setDraftSubInput(next: string) {
+    subInput = next;
+  }
+
   function setThemePreference(next: ThemePreference) {
     themePreference = next;
     if (typeof localStorage !== "undefined") {
@@ -137,36 +184,122 @@ export function createLauncherStore() {
   }
 
   function cycleTheme() {
-    const next: ThemePreference =
-      resolvedTheme === "dark" ? "light" : "dark";
+    const next: ThemePreference = resolvedTheme === "dark" ? "light" : "dark";
     setThemePreference(next);
   }
 
-  async function refreshHomeItems(limit = 27) {
-    homeItems = await featuredHomeItems(limit);
+  function setSearchViewMode(next: SearchViewMode) {
+    searchViewMode = next;
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(SEARCH_MODE_STORAGE_KEY, next);
+    }
+    selectedRow = 0;
+    selectedCol = 0;
+  }
+
+  function toggleSearchViewMode() {
+    setSearchViewMode(searchViewMode === "aggregate" ? "list" : "aggregate");
+  }
+
+  function applyHomeSectionsResponse(res: HomeSectionsResponse) {
+    recentItems = res.recent;
+    pinnedItems = res.pinned;
+    featuredItems = res.featured;
+    const pinnedSet = new Set(res.pinned.map(hitIdentityKey));
+    const syncHitFlags = (list: LauncherHit[]) =>
+      list.map((h) => ({
+        ...h,
+        is_pinned: pinnedSet.has(hitIdentityKey(h)) ? true : null,
+      }));
+    if (hits.length > 0) {
+      hits = syncHitFlags(hits);
+    }
+    if (pastedBaseHits.length > 0) {
+      pastedBaseHits = syncHitFlags(pastedBaseHits);
+    }
+  }
+
+  async function refreshHomeItems(limit = 36) {
+    const res = await launcherHomeSections(limit);
+    applyHomeSectionsResponse(res);
+  }
+
+  function resetSelection() {
+    selectedRow = 0;
+    selectedCol = 0;
+  }
+
+  function resetCollapseState() {
+    recentExpanded = false;
+    pinnedExpanded = false;
+    homeExpanded = false;
+    searchResultsExpanded = false;
+    bestMatchesExpanded = false;
+    recommendationsExpanded = false;
+  }
+
+  function toggleRecentExpanded() {
+    recentExpanded = !recentExpanded;
+  }
+
+  function togglePinnedExpanded() {
+    pinnedExpanded = !pinnedExpanded;
   }
 
   function toggleHomeExpanded() {
     homeExpanded = !homeExpanded;
   }
 
-  function moveHomeSelection(delta: number) {
-    const visibleCount = homeExpanded ? homeItems.length : Math.min(18, homeItems.length);
-    if (visibleCount <= 0) return;
-    if (homeSelectedIndex < 0) {
-      homeSelectedIndex = delta >= 0 ? 0 : visibleCount - 1;
-      return;
+  function toggleSearchResultsExpanded() {
+    searchResultsExpanded = !searchResultsExpanded;
+  }
+
+  function toggleBestMatchesExpanded() {
+    bestMatchesExpanded = !bestMatchesExpanded;
+  }
+
+  function toggleRecommendationsExpanded() {
+    recommendationsExpanded = !recommendationsExpanded;
+  }
+
+  function clampSelection(grid: NavigationGridRow[]) {
+    const next = clampGridCoords(grid, selectedRow, selectedCol);
+    selectedRow = next.row;
+    selectedCol = next.col;
+  }
+
+  function moveGridSelection(
+    grid: NavigationGridRow[],
+    key: "ArrowDown" | "ArrowUp" | "ArrowRight" | "ArrowLeft",
+    navMode: "aggregate" | "list",
+  ) {
+    const next = stepGridSelection(grid, selectedRow, selectedCol, key, navMode);
+    selectedRow = next.row;
+    selectedCol = next.col;
+  }
+
+  function isPinnedHit(hit: Pick<LauncherHit, "plugin_id" | "feature_code" | "is_pinned">): boolean {
+    if (hit.is_pinned) return true;
+    const k = hitIdentityKey(hit);
+    return pinnedItems.some((p) => hitIdentityKey(p) === k);
+  }
+
+  async function runSearchForText(text: string): Promise<LauncherHit[]> {
+    const decision = await searchFeatures(text, false, false);
+    if ("deterministic_results" in decision) {
+      return decision.deterministic_results.matches;
     }
-    homeSelectedIndex = (homeSelectedIndex + delta + visibleCount) % visibleCount;
+    return [];
   }
 
   async function onQueryChange(next: string) {
     query = next;
     searchError = null;
     statusBanner = null;
-    homeSelectedIndex = -1;
+    resetSelection();
+    resetCollapseState();
 
-    if (next.startsWith("@") && mode === "search") {
+    if (next.startsWith("@") && mode === "search" && !pastedText && !pastedFiles) {
       mode = "agent";
       enteredAgentByAt = true;
       return;
@@ -178,24 +311,183 @@ export function createLauncherStore() {
     }
 
     if (mode === "search") {
-      if (!next.trim()) {
-        hits = [];
-        selectedIndex = 0;
+      if (pastedText || (pastedFiles && pastedFiles.length > 0)) {
+        hits = next.trim() ? filterHitsBySubstring(pastedBaseHits, next) : pastedBaseHits;
         return;
       }
+
+      if (!next.trim()) {
+        hits = [];
+        return;
+      }
+
       searchLoading = true;
       try {
-        const decision = await searchFeatures(next, false, false);
-        if ("deterministic_results" in decision) {
-          hits = decision.deterministic_results.matches;
-          selectedIndex = 0;
-        }
+        hits = await runSearchForText(next);
       } catch (err) {
         searchError = err instanceof Error ? err.message : String(err);
       } finally {
         searchLoading = false;
       }
     }
+  }
+
+  async function setPastedText(text: string) {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    pastedFiles = null;
+    pastedText = text;
+    query = "";
+    searchError = null;
+    statusBanner = null;
+    resetSelection();
+    resetCollapseState();
+
+    searchLoading = true;
+    try {
+      pastedBaseHits = await runSearchForText(text);
+      hits = pastedBaseHits;
+    } catch (err) {
+      searchError = err instanceof Error ? err.message : String(err);
+    } finally {
+      searchLoading = false;
+    }
+  }
+
+  async function setPastedFiles(files: PastedFileItem[]) {
+    if (files.length === 0) return;
+    pastedText = null;
+    pastedFiles = files;
+    query = "";
+    searchError = null;
+    statusBanner = null;
+    resetSelection();
+    resetCollapseState();
+
+    searchLoading = true;
+    try {
+      const fileQuery = files.length === 1 ? files[0].name : "files";
+      const [byKind, byName] = await Promise.all([
+        runSearchForText("files"),
+        runSearchForText(fileQuery),
+      ]);
+      const seen = new Set<string>();
+      const merged: LauncherHit[] = [];
+      for (const item of [...byKind, ...byName]) {
+        const k = hitIdentityKey(item);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        merged.push(item);
+      }
+      pastedBaseHits = merged;
+      hits = merged;
+    } catch (err) {
+      searchError = err instanceof Error ? err.message : String(err);
+    } finally {
+      searchLoading = false;
+    }
+  }
+
+  async function clearPastedText() {
+    pastedText = null;
+    pastedBaseHits = [];
+    if (query.trim()) {
+      await onQueryChange(query);
+    } else {
+      hits = [];
+      resetSelection();
+    }
+  }
+
+  async function clearPastedFiles() {
+    pastedFiles = null;
+    pastedBaseHits = [];
+    if (query.trim()) {
+      await onQueryChange(query);
+    } else {
+      hits = [];
+      resetSelection();
+    }
+  }
+
+  async function convertQueryToFilterChip(): Promise<boolean> {
+    const trimmed = query.trim();
+    if (!trimmed || mode !== "search") return false;
+    await setPastedText(trimmed);
+    return true;
+  }
+
+  async function editPastedTextChip() {
+    if (!pastedText) return;
+    const text = pastedText;
+    pastedText = null;
+    pastedBaseHits = [];
+    query = text;
+    void onQueryChange(text);
+  }
+
+  async function editContextChip(index: number) {
+    const chip = chips[index];
+    if (!chip) return;
+    chips = chips.filter((_, idx) => idx !== index);
+    query = chip.value;
+    void onQueryChange(chip.value);
+  }
+
+  async function popLastChipToQuery(): Promise<{ restoredText: string | null; handled: boolean }> {
+    if (pastedFiles && pastedFiles.length > 0) {
+      await clearPastedFiles();
+      return { restoredText: null, handled: true };
+    }
+    if (pastedText !== null) {
+      const text = pastedText;
+      pastedText = null;
+      pastedBaseHits = [];
+      query = text;
+      void onQueryChange(text);
+      return { restoredText: text, handled: true };
+    }
+    if (chips.length > 0) {
+      const last = chips[chips.length - 1];
+      chips = chips.slice(0, -1);
+      query = last.value;
+      void onQueryChange(last.value);
+      return { restoredText: last.value, handled: true };
+    }
+    return { restoredText: null, handled: false };
+  }
+
+  async function mutateState(mutation: LauncherStateMutation) {
+    const res = await mutateLauncherState(mutation);
+    applyHomeSectionsResponse(res);
+
+    if (
+      mutation.op === "pin_recommendation" ||
+      mutation.op === "unpin_recommendation" ||
+      mutation.op === "move_recommendation_to_front"
+    ) {
+      if (pastedText) {
+        pastedBaseHits = await runSearchForText(pastedText);
+        hits = query.trim() ? filterHitsBySubstring(pastedBaseHits, query) : pastedBaseHits;
+      } else if (query.trim()) {
+        hits = await runSearchForText(query);
+      }
+    }
+  }
+
+  async function reorderPinned(nextOrder: LauncherHit[]) {
+    pinnedItems = nextOrder;
+    await mutateState({
+      op: "reorder_pinned",
+      items: nextOrder.map((h) => ({
+        plugin_id: h.plugin_id,
+        feature_code: h.feature_code,
+      })),
+    });
+  }
+
+  async function revealItem(hit: Pick<LauncherHit, "plugin_id" | "feature_code">): Promise<boolean> {
+    return revealInFinder(hit.plugin_id, hit.feature_code);
   }
 
   async function promoteToAgent(prefillPrompt?: string) {
@@ -224,10 +516,8 @@ export function createLauncherStore() {
     listError = null;
   }
 
-  function moveSelection(delta: number) {
-    if (mode === "search" && hits.length > 0) {
-      selectedIndex = (selectedIndex + delta + hits.length) % hits.length;
-    } else if (mode === "list" && listSession && listSession.items.length > 0) {
+  function moveListSelection(delta: number) {
+    if (mode === "list" && listSession && listSession.items.length > 0) {
       const len = listSession.items.length;
       listSelectedIndex = (listSelectedIndex + delta + len) % len;
     }
@@ -243,16 +533,19 @@ export function createLauncherStore() {
     statusBanner = null;
     searchError = null;
     try {
+      const effectiveQuery = pastedText ? (query ? `${pastedText} ${query}` : pastedText) : query;
       const result = await launchItem(
         {
           featureCode: hit.feature_code,
           pluginId: hit.plugin_id,
-          query,
+          query: effectiveQuery,
           kind: hit.kind,
           traceId,
         },
         applyListPush,
       );
+
+      void refreshHomeItems(36);
 
       switch (result.kind) {
         case "list_mode":
@@ -263,6 +556,8 @@ export function createLauncherStore() {
             plugin_name: result.plugin_name,
             feature_code: result.feature_code,
             placeholder: result.placeholder,
+            plugin_icon: result.plugin_icon ?? hit.icon ?? null,
+            plugin_icon_is_dark: result.plugin_icon_is_dark ?? hit.icon_is_dark ?? null,
             items: result.items,
           };
           subInput = "";
@@ -381,37 +676,22 @@ export function createLauncherStore() {
     }
   }
 
-  async function handleSearchEnter() {
-    if (mode === "search") {
-      if (hits.length > 0) {
-        const idx = Math.min(selectedIndex, hits.length - 1);
-        await launchHit(hits[idx]);
-        return;
-      }
-      if (!query.trim() && homeSelectedIndex >= 0) {
-        const visibleCount = homeExpanded ? homeItems.length : Math.min(18, homeItems.length);
-        if (homeSelectedIndex < visibleCount && homeItems[homeSelectedIndex]) {
-          await launchHit(homeItems[homeSelectedIndex]);
+  async function handleFallbackSearchSubmit() {
+    if (mode === "search" && query.trim().length > 0) {
+      try {
+        const decision = await searchFeatures(query, false, true);
+        if ("deterministic_results" in decision && decision.deterministic_results.matches.length > 0) {
+          hits = decision.deterministic_results.matches;
+          resetSelection();
+          await launchHit(hits[0]);
           return;
         }
-      }
-      if (query.trim().length > 0) {
-        try {
-          const decision = await searchFeatures(query, false, true);
-          if ("deterministic_results" in decision && decision.deterministic_results.matches.length > 0) {
-            hits = decision.deterministic_results.matches;
-            selectedIndex = 0;
-            await launchHit(hits[0]);
-            return;
-          }
-          if ("promote_to_agent" in decision) {
-            await promoteToAgent(decision.promote_to_agent.query || query);
-            await submitAgentTurn();
-            return;
-          }
-        } catch (err) {
-          searchError = err instanceof Error ? err.message : String(err);
+        if ("promote_to_agent" in decision) {
+          await promoteToAgent(decision.promote_to_agent.query || query);
+          await submitAgentTurn();
         }
+      } catch (err) {
+        searchError = err instanceof Error ? err.message : String(err);
       }
     } else if (mode === "list") {
       await selectListAt(listSelectedIndex);
@@ -426,6 +706,15 @@ export function createLauncherStore() {
       return;
     }
     if (mode === "list") {
+      if (subInput.length > 0) {
+        await onSubInputChange("");
+        return;
+      }
+      if (pastedText || (pastedFiles && pastedFiles.length > 0)) {
+        pastedText = null;
+        pastedFiles = null;
+        return;
+      }
       exitListToSearch();
       return;
     }
@@ -441,17 +730,31 @@ export function createLauncherStore() {
       await onQueryChange("");
       return;
     }
+    if (pastedText || (pastedFiles && pastedFiles.length > 0) || chips.length > 0) {
+      pastedText = null;
+      pastedFiles = null;
+      pastedBaseHits = [];
+      chips = [];
+      hits = [];
+      resetSelection();
+      return;
+    }
     hasWoken = false;
-    homeExpanded = false;
-    homeSelectedIndex = -1;
-    chips = [];
+    resetCollapseState();
+    resetSelection();
     suggestions = [];
     await hideMainWindow();
   }
 
   async function submitAgentTurn(overridePrompt?: string) {
     const promptText = (overridePrompt ?? query).trim();
-    if (!promptText && chips.length === 0) {
+    const effectiveChips: ContextChip[] = [
+      ...chips,
+      ...(pastedText
+        ? [{ kind: "clipboard" as const, label: "Filter", value: pastedText }]
+        : []),
+    ];
+    if (!promptText && effectiveChips.length === 0) {
       agentError = "Enter a prompt or attach desktop context to run Agent.";
       return;
     }
@@ -504,7 +807,7 @@ export function createLauncherStore() {
         {
           prompt: agentPromptSubmitted,
           traceId,
-          chips,
+          chips: effectiveChips,
           profile: agentProfile,
         },
         handleStreamEvent,
@@ -556,6 +859,7 @@ export function createLauncherStore() {
     faultError = null;
     try {
       lastSyncResult = await syncZtoolsDir(dirPath);
+      await refreshHomeItems(36);
       if (dshOpen || dshStandalone) {
         await refreshDshLogs();
       }
@@ -614,12 +918,12 @@ export function createLauncherStore() {
     if (dshStandalone) {
       await refreshDshLogs();
     } else {
-      const [initialSuggestions, initialHome] = await Promise.all([
+      const [initialSuggestions, sections] = await Promise.all([
         fetchZeroQuerySuggestions(),
-        featuredHomeItems(27),
+        launcherHomeSections(36),
       ]);
       suggestions = initialSuggestions;
-      homeItems = initialHome;
+      applyHomeSectionsResponse(sections);
     }
 
     if (!isTauriRuntime()) {
@@ -666,13 +970,12 @@ export function createLauncherStore() {
       chips = payload.chips ?? [];
       suggestions = payload.suggestions ?? [];
       hasWoken = true;
-      homeSelectedIndex = -1;
+      resetSelection();
+      resetCollapseState();
       statusBanner = null;
       searchError = null;
       if (!isDuplicate) {
-        if (homeItems.length === 0) {
-          void refreshHomeItems(27);
-        }
+        void refreshHomeItems(36);
         void ingestFrontendLog("INFO", "renderer::paint", "Wake payload received", payload.traceId);
       }
     };
@@ -724,18 +1027,27 @@ export function createLauncherStore() {
     get dshStandalone() { return dshStandalone; },
     get mode() { return mode; },
     set mode(v: LauncherMode) { mode = v; },
+    get searchViewMode() { return searchViewMode; },
     get query() { return query; },
     get traceId() { return traceId; },
     get chips() { return chips; },
+    get pastedText() { return pastedText; },
+    get pastedFiles() { return pastedFiles; },
     get suggestions() { return suggestions; },
-    get homeItems() { return homeItems; },
+    get recentItems() { return recentItems; },
+    get pinnedItems() { return pinnedItems; },
+    get featuredItems() { return featuredItems; },
+    get homeItems() { return featuredItems; },
+    get recentExpanded() { return recentExpanded; },
+    get pinnedExpanded() { return pinnedExpanded; },
     get homeExpanded() { return homeExpanded; },
+    get searchResultsExpanded() { return searchResultsExpanded; },
+    get bestMatchesExpanded() { return bestMatchesExpanded; },
+    get recommendationsExpanded() { return recommendationsExpanded; },
     get hasWoken() { return hasWoken; },
-    get homeSelectedIndex() { return homeSelectedIndex; },
-    set homeSelectedIndex(v: number) { homeSelectedIndex = v; },
+    get selectedRow() { return selectedRow; },
+    get selectedCol() { return selectedCol; },
     get hits() { return hits; },
-    get selectedIndex() { return selectedIndex; },
-    set selectedIndex(v: number) { selectedIndex = v; },
     get searchLoading() { return searchLoading; },
     get searchError() { return searchError; },
     get listSession() { return listSession; },
@@ -766,20 +1078,43 @@ export function createLauncherStore() {
     get themePreference() { return themePreference; },
     get resolvedTheme() { return resolvedTheme; },
     setDraftQuery,
+    setDraftSubInput,
     setThemePreference,
     cycleTheme,
+    setSearchViewMode,
+    toggleSearchViewMode,
     refreshHomeItems,
+    resetSelection,
+    resetCollapseState,
+    toggleRecentExpanded,
+    togglePinnedExpanded,
     toggleHomeExpanded,
-    moveHomeSelection,
+    toggleSearchResultsExpanded,
+    toggleBestMatchesExpanded,
+    toggleRecommendationsExpanded,
+    clampSelection,
+    moveGridSelection,
+    isPinnedHit,
     onQueryChange,
+    setPastedText,
+    setPastedFiles,
+    clearPastedText,
+    clearPastedFiles,
+    convertQueryToFilterChip,
+    editPastedTextChip,
+    editContextChip,
+    popLastChipToQuery,
+    mutateState,
+    reorderPinned,
+    revealItem,
     promoteToAgent,
     exitAgentToSearch,
     exitListToSearch,
-    moveSelection,
+    moveListSelection,
     launchHit,
     onSubInputChange,
     selectListAt,
-    handleSearchEnter,
+    handleFallbackSearchSubmit,
     handleEscape,
     submitAgentTurn,
     removeChip,

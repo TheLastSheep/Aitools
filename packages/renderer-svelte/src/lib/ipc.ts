@@ -11,6 +11,12 @@ export interface ContextChip {
   value: string;
 }
 
+export interface PastedFileItem {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+}
+
 export interface QuickAgentAction {
   id: string;
   title: string;
@@ -31,7 +37,32 @@ export interface LauncherHit {
   match_type: string;
   confidence: number;
   explain: string;
+  icon_is_dark?: boolean | null;
+  target_path?: string | null;
+  is_pinned?: boolean | null;
+  is_recommendation_pinned?: boolean | null;
+  use_count?: number | null;
 }
+
+export interface HomeSectionsResponse {
+  recent: LauncherHit[];
+  pinned: LauncherHit[];
+  featured: LauncherHit[];
+}
+
+export interface LauncherItemRef {
+  plugin_id: string;
+  feature_code: string;
+}
+
+export type LauncherStateMutation =
+  | { op: "pin"; plugin_id: string; feature_code: string }
+  | { op: "unpin"; plugin_id: string; feature_code: string }
+  | { op: "reorder_pinned"; items: LauncherItemRef[] }
+  | { op: "remove_recent"; plugin_id: string; feature_code: string }
+  | { op: "pin_recommendation"; plugin_id: string; feature_code: string }
+  | { op: "unpin_recommendation"; plugin_id: string; feature_code: string }
+  | { op: "move_recommendation_to_front"; plugin_id: string; feature_code: string };
 
 export type LauncherDecision =
   | { deterministic_results: { matches: LauncherHit[]; top_confidence: number } }
@@ -57,6 +88,8 @@ export interface ListSession {
   plugin_name: string;
   feature_code: string;
   placeholder?: string | null;
+  plugin_icon?: string | null;
+  plugin_icon_is_dark?: boolean | null;
   items: ListItem[];
 }
 
@@ -70,6 +103,8 @@ export type LaunchResult =
       plugin_name: string;
       feature_code: string;
       placeholder?: string | null;
+      plugin_icon?: string | null;
+      plugin_icon_is_dark?: boolean | null;
       items: ListItem[];
     }
   | {
@@ -279,6 +314,30 @@ export async function hideMainWindow(): Promise<void> {
   await invokeSafe<void>("hide_main_window");
 }
 
+function svgIconUri(svgMarkup: string): string {
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svgMarkup)}`;
+}
+
+const DARK_MONO_CLIPBOARD_ICON = svgIconUri(
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none"><rect x="7" y="6" width="18" height="21" rx="3" stroke="#1f2328" stroke-width="2.4"/><path d="M12 5.5h8" stroke="#1f2328" stroke-width="2.4" stroke-linecap="round"/><path d="M11 13h10M11 18h7" stroke="#1f2328" stroke-width="2.2" stroke-linecap="round"/></svg>`,
+);
+
+const LIGHT_MONO_DOCS_ICON = svgIconUri(
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none"><path d="M7 7.5A2.5 2.5 0 0 1 9.5 5H24v21H9.5A2.5 2.5 0 0 1 7 23.5v-16Z" stroke="#f3f4f6" stroke-width="2.4"/><path d="M12 11h7M12 16h7" stroke="#f3f4f6" stroke-width="2.2" stroke-linecap="round"/></svg>`,
+);
+
+const DARK_MONO_LIST_ICON = svgIconUri(
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none"><rect x="6" y="7" width="20" height="18" rx="3" stroke="#111827" stroke-width="2.4"/><path d="M11 13h10M11 19h6" stroke="#111827" stroke-width="2.2" stroke-linecap="round"/></svg>`,
+);
+
+const COLOR_JSON_ICON = svgIconUri(
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#047857"/><text x="16" y="21" text-anchor="middle" font-family="monospace" font-size="13" font-weight="bold" fill="#ffffff">{}</text></svg>`,
+);
+
+const COLOR_SAFARI_ICON = svgIconUri(
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#0284c7"/><circle cx="16" cy="16" r="10" fill="#ffffff" opacity="0.22"/><polygon points="16,8 19,16 16,24 13,16" fill="#ef4444"/></svg>`,
+);
+
 const PREVIEW_CATALOG: LauncherHit[] = [
   {
     feature_code: "clipboard-history",
@@ -286,11 +345,14 @@ const PREVIEW_CATALOG: LauncherHit[] = [
     label: "Clipboard History",
     plugin_name: "Clipboard History",
     description: "Search, copy, and pin recent clipboard snippets",
+    icon: DARK_MONO_CLIPBOARD_ICON,
     kind: "plugin",
     score: 96,
     match_type: "prefix",
     confidence: 0.96,
     explain: "Search, copy, and pin recent clipboard snippets",
+    icon_is_dark: true,
+    target_path: "/Users/harris/Desktop/aitools/plugins/builtin/clipboard-history",
   },
   {
     feature_code: "translate",
@@ -303,6 +365,7 @@ const PREVIEW_CATALOG: LauncherHit[] = [
     match_type: "keyword",
     confidence: 0.92,
     explain: "Translate technical prose across EN, ZH, JA, and KO",
+    target_path: "/Users/harris/Desktop/aitools/plugins/builtin/translation",
   },
   {
     feature_code: "snipaste-ocr",
@@ -310,11 +373,14 @@ const PREVIEW_CATALOG: LauncherHit[] = [
     label: "Snipaste OCR",
     plugin_name: "Snipaste Pro (Legacy)",
     description: "Headless ZTools list mode for OCR & QR scan",
+    icon: DARK_MONO_LIST_ICON,
     kind: "list",
     score: 88,
     match_type: "keyword",
     confidence: 0.88,
     explain: "Recognize text or QR barcodes from clipboard screenshots",
+    icon_is_dark: true,
+    target_path: "/Users/harris/Desktop/aitools/plugins/builtin/snipaste-legacy",
   },
   {
     feature_code: "todo",
@@ -327,6 +393,7 @@ const PREVIEW_CATALOG: LauncherHit[] = [
     match_type: "keyword",
     confidence: 0.85,
     explain: "Manage local tasks via synchronous storage",
+    target_path: "/Users/harris/Desktop/aitools/plugins/builtin/todo-legacy",
   },
   {
     feature_code: "format_json",
@@ -334,11 +401,14 @@ const PREVIEW_CATALOG: LauncherHit[] = [
     label: "JSON Formatter & Codec",
     plugin_name: "JSON Formatter & Codec",
     description: "Validate, prettify, and Base64/URL encode payloads",
+    icon: COLOR_JSON_ICON,
     kind: "wasm",
     score: 82,
     match_type: "keyword",
     confidence: 0.82,
     explain: "Validate, prettify, or minify JSON inside Wasm sandbox",
+    icon_is_dark: null,
+    target_path: "/Users/harris/Desktop/aitools/plugins/builtin/json-codec",
   },
   {
     feature_code: "terminal-launchpad",
@@ -351,6 +421,7 @@ const PREVIEW_CATALOG: LauncherHit[] = [
     match_type: "keyword",
     confidence: 0.8,
     explain: "Saved project directories and command shortcuts",
+    target_path: "/Users/harris/Desktop/aitools/plugins/builtin/terminal-launchpad",
   },
 ];
 
@@ -361,6 +432,7 @@ function previewItem(
   description: string,
   kind: HitKind = "app",
   score = 75,
+  extra: Partial<LauncherHit> = {},
 ): LauncherHit {
   return {
     feature_code,
@@ -373,26 +445,86 @@ function previewItem(
     match_type: "featured",
     confidence: score / 100,
     explain: description,
+    ...extra,
   };
 }
 
 const PREVIEW_HOME_CATALOG: LauncherHit[] = [
   ...PREVIEW_CATALOG,
-  previewItem("dev-docs-reference", "dev-docs", "DevDocs", "Search offline developer docs", "plugin", 79),
-  previewItem("timestamp-calc", "timestamp_now", "时间戳转换", "Unix timestamp & ISO8601 Wasm utility", "wasm", 78),
-  previewItem("system-apps", "app:Safari", "Safari", "Web browser", "app", 77),
-  previewItem("system-apps", "app:Terminal", "Terminal", "macOS command line", "app", 76),
-  previewItem("system-apps", "app:Finder", "Finder", "File manager", "app", 75),
-  previewItem("system-apps", "app:Notes", "备忘录", "Apple Notes", "app", 74),
-  previewItem("system-apps", "app:SystemSettings", "系统设置", "macOS System Settings", "app", 73),
-  previewItem("system-apps", "app:ActivityMonitor", "活动监视器", "Process & memory monitor", "app", 72),
-  previewItem("system-apps", "app:Preview", "预览", "PDF & image viewer", "app", 71),
-  previewItem("system-apps", "app:Calculator", "计算器", "Desktop calculator", "app", 70),
-  previewItem("system-apps", "app:Calendar", "日历", "Schedules & events", "app", 69),
-  previewItem("system-apps", "app:Messages", "信息", "Apple Messages", "app", 68),
-  previewItem("system-apps", "app:Mail", "邮件", "Email client", "app", 67),
-  previewItem("system-apps", "app:Reminders", "提醒事项", "Tasks & reminders", "app", 66),
-  previewItem("system-apps", "app:Screenshots", "截屏", "Screen capture utility", "app", 65),
+  previewItem("dev-docs-reference", "dev-docs", "DevDocs", "Search offline developer docs", "plugin", 79, {
+    icon: LIGHT_MONO_DOCS_ICON,
+    icon_is_dark: false,
+    target_path: "/Users/harris/Desktop/aitools/plugins/builtin/dev-docs-reference",
+  }),
+  previewItem(
+    "timestamp-calc",
+    "timestamp_now",
+    "时间戳转换",
+    "Unix timestamp & ISO8601 Wasm utility",
+    "wasm",
+    78,
+  ),
+  previewItem("system-apps", "app:Safari", "Safari", "Web browser", "app", 77, {
+    icon: COLOR_SAFARI_ICON,
+    icon_is_dark: null,
+    target_path: "/Applications/Safari.app",
+  }),
+  previewItem("system-apps", "app:Terminal", "Terminal", "macOS command line", "app", 76, {
+    target_path: "/System/Applications/Utilities/Terminal.app",
+  }),
+  previewItem("system-apps", "app:Finder", "Finder", "File manager", "app", 75, {
+    target_path: "/System/Library/CoreServices/Finder.app",
+  }),
+  previewItem("system-apps", "app:Notes", "备忘录", "Apple Notes", "app", 74, {
+    target_path: "/System/Applications/Notes.app",
+  }),
+  previewItem("system-apps", "app:SystemSettings", "系统设置", "macOS System Settings", "app", 73, {
+    target_path: "/System/Applications/System Settings.app",
+  }),
+  previewItem(
+    "system-apps",
+    "app:ActivityMonitor",
+    "活动监视器",
+    "Process & memory monitor",
+    "app",
+    72,
+    { target_path: "/System/Applications/Utilities/Activity Monitor.app" },
+  ),
+  previewItem("system-apps", "app:Preview", "预览", "PDF & image viewer", "app", 71, {
+    target_path: "/System/Applications/Preview.app",
+  }),
+  previewItem("system-apps", "app:Calculator", "计算器", "Desktop calculator", "app", 70, {
+    target_path: "/System/Applications/Calculator.app",
+  }),
+  previewItem("system-apps", "app:Calendar", "日历", "Schedules & events", "app", 69, {
+    target_path: "/System/Applications/Calendar.app",
+  }),
+  previewItem("system-apps", "app:Messages", "信息", "Apple Messages", "app", 68, {
+    target_path: "/System/Applications/Messages.app",
+  }),
+  previewItem("system-apps", "app:Mail", "邮件", "Email client", "app", 67, {
+    target_path: "/System/Applications/Mail.app",
+  }),
+  previewItem("system-apps", "app:Reminders", "提醒事项", "Tasks & reminders", "app", 66, {
+    target_path: "/System/Applications/Reminders.app",
+  }),
+  previewItem("system-apps", "app:Screenshots", "截屏", "Screen capture utility", "app", 65, {
+    target_path: "/System/Applications/Utilities/Screenshot.app",
+  }),
+];
+
+const PREVIEW_OVER_RECOMMENDATIONS: LauncherHit[] = [
+  previewItem("translation", "translate-over", "快速翻译", "使用 AI Translator 翻译当前内容", "plugin", 55, {
+    match_type: "over",
+  }),
+  previewItem("todo-legacy", "todo-capture", "记入待办", "将当前文本快速保存为 ToDo 任务", "plugin", 54, {
+    match_type: "over",
+  }),
+  previewItem("clipboard-history", "clip-save", "存为剪贴板片段", "保存当前文本到剪贴板历史", "plugin", 53, {
+    icon: DARK_MONO_CLIPBOARD_ICON,
+    icon_is_dark: true,
+    match_type: "over",
+  }),
 ];
 
 const PREVIEW_LIST_ITEMS: ListItem[] = [
@@ -406,18 +538,139 @@ const PREVIEW_LIST_ITEMS: ListItem[] = [
     description: "Scan clipboard image for QR payloads",
     payload: { code: "decode-qr" },
   },
+  {
+    title: "Pin Floating Screenshot",
+    description: "Keep captured image floating above windows",
+    payload: { code: "pin-shot" },
+  },
 ];
 
+function hitKey(pluginId: string, featureCode: string): string {
+  return `${pluginId}:${featureCode}`;
+}
+
+let previewRecentRefs: LauncherItemRef[] = PREVIEW_HOME_CATALOG.slice(0, 20).map((h) => ({
+  plugin_id: h.plugin_id,
+  feature_code: h.feature_code,
+}));
+
+let previewPinnedRefs: LauncherItemRef[] = [
+  { plugin_id: "clipboard-history", feature_code: "clipboard-history" },
+  { plugin_id: "json-codec", feature_code: "format_json" },
+  { plugin_id: "translation", feature_code: "translate" },
+  { plugin_id: "snipaste-legacy", feature_code: "snipaste-ocr" },
+  { plugin_id: "dev-docs-reference", feature_code: "dev-docs" },
+  { plugin_id: "terminal-launchpad", feature_code: "terminal-launchpad" },
+  { plugin_id: "system-apps", feature_code: "app:Safari" },
+  { plugin_id: "system-apps", feature_code: "app:Terminal" },
+  { plugin_id: "system-apps", feature_code: "app:Finder" },
+  { plugin_id: "todo-legacy", feature_code: "todo" },
+];
+
+let previewRecommendationPins: LauncherItemRef[] = [];
+const previewUsageCounts = new Map<string, number>();
+
+function findPreviewHit(pluginId: string, featureCode: string): LauncherHit | undefined {
+  return (
+    PREVIEW_HOME_CATALOG.find(
+      (h) => h.plugin_id === pluginId && h.feature_code === featureCode,
+    ) ??
+    PREVIEW_OVER_RECOMMENDATIONS.find(
+      (h) => h.plugin_id === pluginId && h.feature_code === featureCode,
+    )
+  );
+}
+
+function enrichPreviewHit(hit: LauncherHit): LauncherHit {
+  const k = hitKey(hit.plugin_id, hit.feature_code);
+  const pinned = previewPinnedRefs.some(
+    (p) => p.plugin_id === hit.plugin_id && p.feature_code === hit.feature_code,
+  );
+  const recPinned = previewRecommendationPins.some(
+    (p) => p.plugin_id === hit.plugin_id && p.feature_code === hit.feature_code,
+  );
+  return {
+    ...hit,
+    is_pinned: pinned ? true : null,
+    is_recommendation_pinned: recPinned ? true : null,
+    use_count: previewUsageCounts.get(k) ?? hit.use_count ?? 0,
+  };
+}
+
+function buildPreviewHomeSections(limit = 27): HomeSectionsResponse {
+  const clamped = Math.max(1, Math.min(54, Math.round(limit)));
+  const resolveList = (refs: LauncherItemRef[]) =>
+    refs
+      .map((r) => findPreviewHit(r.plugin_id, r.feature_code))
+      .filter((h): h is LauncherHit => Boolean(h))
+      .slice(0, clamped)
+      .map(enrichPreviewHit);
+  return {
+    recent: resolveList(previewRecentRefs),
+    pinned: resolveList(previewPinnedRefs),
+    featured: PREVIEW_HOME_CATALOG.slice(0, clamped).map(enrichPreviewHit),
+  };
+}
+
 function previewFilterHits(query: string): LauncherHit[] {
-  const q = query.trim().toLowerCase();
+  const raw = query.trim();
+  const q = raw.toLowerCase();
   if (!q) return [];
-  return PREVIEW_CATALOG.filter(
+
+  const textMatches = PREVIEW_HOME_CATALOG.filter(
     (item) =>
       item.label.toLowerCase().includes(q) ||
       item.feature_code.toLowerCase().includes(q) ||
       item.plugin_name.toLowerCase().includes(q) ||
       item.description.toLowerCase().includes(q),
+  ).map((item) => {
+    const labelLower = item.label.toLowerCase();
+    const match_type =
+      labelLower === q ? "exact" : labelLower.startsWith(q) ? "prefix" : "contains";
+    return enrichPreviewHit({ ...item, match_type });
+  });
+
+  const regexMatches: LauncherHit[] = [];
+  if (raw.startsWith("{") || raw.startsWith("[")) {
+    regexMatches.push(
+      enrichPreviewHit({
+        ...PREVIEW_CATALOG[4],
+        match_type: "regex",
+        score: 94,
+      }),
+    );
+  }
+  if (/^\d{10,13}$/.test(raw)) {
+    const tsHit = findPreviewHit("timestamp-calc", "timestamp_now");
+    if (tsHit) {
+      regexMatches.push(enrichPreviewHit({ ...tsHit, match_type: "regex", score: 93 }));
+    }
+  }
+  if (q.includes("file") || q.includes("files")) {
+    regexMatches.push(
+      enrichPreviewHit({
+        ...PREVIEW_CATALOG[2],
+        feature_code: "snipaste-file-open",
+        label: "Snipaste Open Image",
+        match_type: "files",
+        score: 91,
+      }),
+    );
+  }
+
+  const pinOrder = new Map(
+    previewRecommendationPins.map((p, idx) => [hitKey(p.plugin_id, p.feature_code), idx]),
   );
+  const recMatches = PREVIEW_OVER_RECOMMENDATIONS.map(enrichPreviewHit).sort((a, b) => {
+    const pa = pinOrder.get(hitKey(a.plugin_id, a.feature_code));
+    const pb = pinOrder.get(hitKey(b.plugin_id, b.feature_code));
+    if (pa !== undefined && pb !== undefined) return pa - pb;
+    if (pa !== undefined) return -1;
+    if (pb !== undefined) return 1;
+    return (b.use_count ?? 0) - (a.use_count ?? 0);
+  });
+
+  return [...textMatches, ...regexMatches, ...recMatches];
 }
 
 export async function searchFeatures(
@@ -464,7 +717,136 @@ export async function featuredHomeItems(limit = 27): Promise<LauncherHit[]> {
   } catch {
     // Fall back to curated browser preview items when backend command is unavailable.
   }
-  return PREVIEW_HOME_CATALOG.slice(0, clamped);
+  return PREVIEW_HOME_CATALOG.slice(0, clamped).map(enrichPreviewHit);
+}
+
+export async function launcherHomeSections(limit = 27): Promise<HomeSectionsResponse> {
+  const clamped = Math.max(1, Math.min(54, Math.round(limit)));
+  if (isTauriRuntime()) {
+    try {
+      const res = await invokeSafe<HomeSectionsResponse>("plugin:aitools|launcher_home_sections", {
+        limit: clamped,
+      });
+      if (res && Array.isArray(res.recent) && Array.isArray(res.pinned) && Array.isArray(res.featured)) {
+        return res;
+      }
+    } catch {
+      // Fall back cleanly if host mock doesn't implement launcher_home_sections yet.
+    }
+    const featured = await featuredHomeItems(clamped);
+    return { recent: [], pinned: [], featured };
+  }
+  return buildPreviewHomeSections(clamped);
+}
+
+export async function mutateLauncherState(
+  mutation: LauncherStateMutation,
+): Promise<HomeSectionsResponse> {
+  if (isTauriRuntime()) {
+    try {
+      const res = await invokeSafe<HomeSectionsResponse>("plugin:aitools|launcher_mutate_state", {
+        mutation,
+      });
+      if (res && Array.isArray(res.recent) && Array.isArray(res.pinned) && Array.isArray(res.featured)) {
+        return res;
+      }
+    } catch {
+      // Fall back to current home sections when mock omits launcher_mutate_state.
+    }
+    return launcherHomeSections(27);
+  }
+
+  switch (mutation.op) {
+    case "pin": {
+      const exists = previewPinnedRefs.some(
+        (p) => p.plugin_id === mutation.plugin_id && p.feature_code === mutation.feature_code,
+      );
+      if (!exists) {
+        previewPinnedRefs = [
+          ...previewPinnedRefs,
+          { plugin_id: mutation.plugin_id, feature_code: mutation.feature_code },
+        ];
+      }
+      break;
+    }
+    case "unpin": {
+      previewPinnedRefs = previewPinnedRefs.filter(
+        (p) => !(p.plugin_id === mutation.plugin_id && p.feature_code === mutation.feature_code),
+      );
+      break;
+    }
+    case "reorder_pinned": {
+      const seen = new Set<string>();
+      const next: LauncherItemRef[] = [];
+      for (const item of mutation.items) {
+        const k = hitKey(item.plugin_id, item.feature_code);
+        if (!seen.has(k)) {
+          seen.add(k);
+          next.push(item);
+        }
+      }
+      for (const existing of previewPinnedRefs) {
+        const k = hitKey(existing.plugin_id, existing.feature_code);
+        if (!seen.has(k)) {
+          seen.add(k);
+          next.push(existing);
+        }
+      }
+      previewPinnedRefs = next;
+      break;
+    }
+    case "remove_recent": {
+      previewRecentRefs = previewRecentRefs.filter(
+        (p) => !(p.plugin_id === mutation.plugin_id && p.feature_code === mutation.feature_code),
+      );
+      break;
+    }
+    case "pin_recommendation": {
+      const exists = previewRecommendationPins.some(
+        (p) => p.plugin_id === mutation.plugin_id && p.feature_code === mutation.feature_code,
+      );
+      if (!exists) {
+        previewRecommendationPins = [
+          ...previewRecommendationPins,
+          { plugin_id: mutation.plugin_id, feature_code: mutation.feature_code },
+        ];
+      }
+      break;
+    }
+    case "unpin_recommendation": {
+      previewRecommendationPins = previewRecommendationPins.filter(
+        (p) => !(p.plugin_id === mutation.plugin_id && p.feature_code === mutation.feature_code),
+      );
+      break;
+    }
+    case "move_recommendation_to_front": {
+      const target = { plugin_id: mutation.plugin_id, feature_code: mutation.feature_code };
+      previewRecommendationPins = [
+        target,
+        ...previewRecommendationPins.filter(
+          (p) => !(p.plugin_id === target.plugin_id && p.feature_code === target.feature_code),
+        ),
+      ];
+      break;
+    }
+  }
+  return buildPreviewHomeSections(36);
+}
+
+export async function revealInFinder(pluginId: string, featureCode: string): Promise<boolean> {
+  if (isTauriRuntime()) {
+    try {
+      const res = await invokeSafe<boolean>("plugin:aitools|reveal_in_finder", {
+        pluginId,
+        featureCode,
+      });
+      return Boolean(res);
+    } catch {
+      return false;
+    }
+  }
+  const hit = findPreviewHit(pluginId, featureCode);
+  return Boolean(hit?.target_path);
 }
 
 export async function launchItem(
@@ -487,6 +869,17 @@ export async function launchItem(
     });
   }
 
+  const key = hitKey(params.pluginId, params.featureCode);
+  previewUsageCounts.set(key, (previewUsageCounts.get(key) ?? 0) + 1);
+  if (findPreviewHit(params.pluginId, params.featureCode)) {
+    previewRecentRefs = [
+      { plugin_id: params.pluginId, feature_code: params.featureCode },
+      ...previewRecentRefs.filter(
+        (r) => !(r.plugin_id === params.pluginId && r.feature_code === params.featureCode),
+      ),
+    ].slice(0, 36);
+  }
+
   if (params.kind === "list" || params.featureCode === "snipaste-ocr") {
     return {
       kind: "list_mode",
@@ -495,6 +888,8 @@ export async function launchItem(
       plugin_name: "Snipaste Pro (Legacy)",
       feature_code: params.featureCode,
       placeholder: "Filter list actions...",
+      plugin_icon: DARK_MONO_LIST_ICON,
+      plugin_icon_is_dark: true,
       items: PREVIEW_LIST_ITEMS,
     };
   }
