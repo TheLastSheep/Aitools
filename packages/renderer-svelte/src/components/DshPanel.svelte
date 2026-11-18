@@ -223,6 +223,11 @@
     min-height: 28px;
   }
 
+  .dsh-filter::placeholder {
+    color: var(--text-tertiary);
+    opacity: 1;
+  }
+
   .dsh-btn {
     padding: var(--space-1) var(--space-3);
     border-radius: var(--radius-sm);

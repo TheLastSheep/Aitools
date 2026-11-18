@@ -873,6 +873,7 @@
 
   .search-input::placeholder {
     color: var(--text-tertiary);
+    opacity: 1;
   }
 
   .bar-actions {
@@ -1259,7 +1260,13 @@
     border-radius: var(--radius-md);
     border: 1px solid var(--border-strong);
     background: var(--bg-elevated);
+    color: var(--text-primary);
     font-size: var(--text-sm);
+  }
+
+  .sub-input::placeholder {
+    color: var(--text-tertiary);
+    opacity: 1;
   }
 
   .agent-status-pill {

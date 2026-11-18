@@ -203,6 +203,12 @@ textarea {
   color: inherit;
 }
 
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-tertiary);
+  opacity: 1;
+}
+
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
