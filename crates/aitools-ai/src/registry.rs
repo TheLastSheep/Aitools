@@ -35,7 +35,7 @@ pub struct RegisteredTool {
 }
 
 /// Aggregates tools from all 5 tiers and performs Top-K semantic pre-filtering (`SPEC-007-R6`).
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ToolRegistry {
     tools: BTreeMap<String, RegisteredTool>,
 }

@@ -26,24 +26,93 @@ pub enum PromotionReason {
     LowDeterministicConfidence,
 }
 
+/// Enriched launcher search match returned to the Svelte shell (`SPEC-007-R1`, `SPEC-017-R3`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LauncherHit {
+    /// Target feature identifier within the plugin or app catalog.
     pub feature_code: String,
+    /// Owning plugin or catalog identifier.
     pub plugin_id: String,
+    /// Primary human-readable label for display.
+    pub label: String,
+    /// Owning plugin or application display name.
+    pub plugin_name: String,
+    /// Concise feature description for secondary row text.
+    pub description: String,
+    /// Optional resolved icon (`data:` URI or URL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// Dispatch kind hint (`"app"`, `"plugin"`, `"list"`, `"wasm"`, `"macro"`, `"feature"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Deterministic/fuzzy relevance score.
     pub score: i32,
+    /// Match category (`"exact"`, `"prefix"`, `"pinyin"`, `"regex"`, `"over"`, `"contains"`, `"fuzzy"`, `"files"`, `"img"`).
     pub match_type: String,
+    /// Normalized confidence in `0.0..=1.0`.
     pub confidence: f64,
+    /// Human-readable explanation / subtitle matching `FeatureEntry::explain`.
+    pub explain: String,
+}
+
+impl LauncherHit {
+    /// Constructs an enriched [`LauncherHit`] using metadata retained in `index`.
+    #[must_use]
+    pub fn from_match_with_index(m: MatchResult, index: &FeatureSearchIndex) -> Self {
+        let confidence = (f64::from(m.score) / 100.0).clamp(0.0, 1.0);
+        let meta = index.feature_meta(&m.plugin_id, &m.feature_code);
+        let kind = infer_hit_kind(&m.plugin_id, &m.feature_code);
+        let (label, plugin_name, icon, explain) = match meta {
+            Some(meta) => (meta.label, meta.plugin_name, meta.icon, meta.explain),
+            None => (
+                m.feature_code.clone(),
+                m.plugin_id.clone(),
+                None,
+                String::new(),
+            ),
+        };
+        Self {
+            feature_code: m.feature_code,
+            plugin_id: m.plugin_id,
+            label,
+            plugin_name,
+            description: explain.clone(),
+            icon,
+            kind,
+            score: m.score,
+            match_type: m.match_type.to_string(),
+            confidence,
+            explain,
+        }
+    }
+}
+
+fn infer_hit_kind(plugin_id: &str, feature_code: &str) -> Option<String> {
+    if plugin_id == "system-apps" || feature_code.starts_with("app:") {
+        Some("app".to_string())
+    } else if plugin_id == "aitools-macros" || feature_code.starts_with("macro:") {
+        Some("macro".to_string())
+    } else {
+        None
+    }
 }
 
 impl From<MatchResult> for LauncherHit {
     fn from(m: MatchResult) -> Self {
         let confidence = (f64::from(m.score) / 100.0).clamp(0.0, 1.0);
+        let kind = infer_hit_kind(&m.plugin_id, &m.feature_code);
         Self {
+            label: m.feature_code.clone(),
+            plugin_name: m.plugin_id.clone(),
+            description: String::new(),
+            icon: None,
+            kind,
             feature_code: m.feature_code,
             plugin_id: m.plugin_id,
             score: m.score,
             match_type: m.match_type.to_string(),
             confidence,
+            explain: String::new(),
         }
     }
 }
@@ -70,7 +139,10 @@ pub fn evaluate_launcher_input(
     }
 
     let raw_matches = index.search_checked(trimmed)?;
-    let hits: Vec<LauncherHit> = raw_matches.into_iter().map(LauncherHit::from).collect();
+    let hits: Vec<LauncherHit> = raw_matches
+        .into_iter()
+        .map(|m| LauncherHit::from_match_with_index(m, index))
+        .collect();
     let top_confidence = hits.first().map_or(0.0, |h| h.confidence);
 
     if submitted {
@@ -127,12 +199,21 @@ mod tests {
     fn spec_007_r1_and_r2_fast_path_and_agent_promotion() {
         let index = build_index(&sample_features()).unwrap();
 
-        // Keystroke renders deterministic fast path immediately.
+        // Keystroke renders deterministic fast path immediately with enriched metadata.
         let fast = evaluate_launcher_input(&index, "calc", false, false).unwrap();
-        assert!(matches!(
-            fast,
-            LauncherDecision::DeterministicResults { top_confidence, .. } if top_confidence >= 0.9
-        ));
+        match &fast {
+            LauncherDecision::DeterministicResults {
+                matches,
+                top_confidence,
+            } => {
+                assert!(*top_confidence >= 0.9);
+                assert_eq!(matches[0].label, "Calculator");
+                assert_eq!(matches[0].plugin_name, "Calculator");
+                assert_eq!(matches[0].explain, "Evaluate math expressions");
+                assert_eq!(matches[0].description, "Evaluate math expressions");
+            }
+            LauncherDecision::PromoteToAgent { .. } => panic!("expected deterministic results"),
+        }
 
         // Tab promotes immediately.
         let tab = evaluate_launcher_input(&index, "calc", true, false).unwrap();

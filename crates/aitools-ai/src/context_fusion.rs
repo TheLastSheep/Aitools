@@ -15,25 +15,50 @@ pub enum ContentSignature {
     Empty,
 }
 
-/// Unified ambient context captured prior to launcher focus (`SPEC-011-R1`).
+/// Unified ambient context captured prior to launcher focus (`SPEC-011-R1`, `SPEC-016-R5`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextEnvelope {
+    /// Correlation trace identifier for the wake/capture turn.
+    #[serde(default, alias = "traceId")]
     pub trace_id: String,
-    pub selection: Option<String>,
-    pub clipboard: Option<String>,
-    pub active_app: Option<String>,
+    /// Frontmost application display name.
+    #[serde(default, alias = "active_app")]
+    pub app_name: Option<String>,
+    /// Frontmost application bundle identifier.
+    #[serde(default)]
+    pub bundle_id: Option<String>,
+    /// Frontmost focused window title.
+    #[serde(default)]
+    pub window_title: Option<String>,
+    /// Selected text captured before wake.
+    #[serde(default, alias = "selection")]
+    pub selected_text: Option<String>,
+    /// Plain-text clipboard preview captured before wake.
+    #[serde(default, alias = "clipboard")]
+    pub clipboard_preview: Option<String>,
+    /// Active filesystem path associated with the focused context.
+    #[serde(default, alias = "activeFsPath")]
     pub active_path: Option<String>,
+    /// Optional image handle or data URI captured from the clipboard.
+    #[serde(default)]
     pub image_handle: Option<String>,
+    /// Unix epoch timestamp (milliseconds) when captured.
+    #[serde(default)]
+    pub captured_at_ms: Option<u64>,
 }
 
 impl ContextEnvelope {
-    /// Returns the highest-priority non-empty textual payload (`selection` before `clipboard`).
+    /// Returns the highest-priority non-empty textual payload (`selected_text` before `clipboard_preview`).
     #[must_use]
     pub fn primary_text(&self) -> Option<&str> {
-        self.selection
+        self.selected_text
             .as_deref()
             .filter(|s| !s.trim().is_empty())
-            .or_else(|| self.clipboard.as_deref().filter(|s| !s.trim().is_empty()))
+            .or_else(|| {
+                self.clipboard_preview
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+            })
     }
 
     /// Classifies the ambient context without blocking on network or LLM inference.
@@ -283,7 +308,7 @@ mod tests {
     fn spec_011_r1_classifies_context_and_returns_top_3_suggestions() {
         let json_env = ContextEnvelope {
             trace_id: "wake-1".into(),
-            clipboard: Some(r#"{"name":"aitools","v":2}"#.into()),
+            clipboard_preview: Some(r#"{"name":"aitools","v":2}"#.into()),
             ..Default::default()
         };
         assert_eq!(json_env.classify(), ContentSignature::Json);
@@ -293,7 +318,7 @@ mod tests {
 
         let trace_env = ContextEnvelope {
             trace_id: "wake-2".into(),
-            selection: Some("thread 'main' panicked at src/main.rs:12:5".into()),
+            selected_text: Some("thread 'main' panicked at src/main.rs:12:5".into()),
             ..Default::default()
         };
         assert_eq!(trace_env.classify(), ContentSignature::StackTrace);
@@ -301,5 +326,41 @@ mod tests {
             suggest_zero_query_actions(&trace_env)[0].id,
             "trace-diagnose"
         );
+    }
+
+    #[test]
+    fn spec_016_r5_context_envelope_aligns_with_sdk_and_legacy_aliases() {
+        let canonical: ContextEnvelope = serde_json::from_str(
+            r#"{
+                "trace_id": "wake-9",
+                "app_name": "Cursor",
+                "bundle_id": "com.todesktop.230313mzl4w4u92",
+                "window_title": "lib.rs",
+                "selected_text": "let x = 1;",
+                "clipboard_preview": "copied",
+                "active_path": "/tmp/lib.rs",
+                "captured_at_ms": 1700000000000
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(canonical.app_name.as_deref(), Some("Cursor"));
+        assert_eq!(canonical.selected_text.as_deref(), Some("let x = 1;"));
+        assert_eq!(canonical.captured_at_ms, Some(1_700_000_000_000));
+
+        let legacy: ContextEnvelope = serde_json::from_str(
+            r#"{
+                "traceId": "wake-legacy",
+                "active_app": "Terminal",
+                "selection": "ls -la",
+                "clipboard": "pwd",
+                "activeFsPath": "/Users/demo"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.trace_id, "wake-legacy");
+        assert_eq!(legacy.app_name.as_deref(), Some("Terminal"));
+        assert_eq!(legacy.selected_text.as_deref(), Some("ls -la"));
+        assert_eq!(legacy.clipboard_preview.as_deref(), Some("pwd"));
+        assert_eq!(legacy.active_path.as_deref(), Some("/Users/demo"));
     }
 }
