@@ -811,28 +811,24 @@ pub fn decode_manifest_bytes(bytes: &[u8]) -> Result<String> {
             .map_err(|e| AitoolsError::Manifest(format!("invalid UTF-8 manifest: {e}")));
     }
     if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
-        if rest.len() % 2 != 0 {
+        let (chunks, remainder) = rest.as_chunks::<2>();
+        if !remainder.is_empty() {
             return Err(AitoolsError::Manifest(
                 "invalid UTF-16LE manifest length".into(),
             ));
         }
-        let units: Vec<u16> = rest
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
+        let units: Vec<u16> = chunks.iter().copied().map(u16::from_le_bytes).collect();
         return String::from_utf16(&units)
             .map_err(|e| AitoolsError::Manifest(format!("invalid UTF-16LE manifest: {e}")));
     }
     if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
-        if rest.len() % 2 != 0 {
+        let (chunks, remainder) = rest.as_chunks::<2>();
+        if !remainder.is_empty() {
             return Err(AitoolsError::Manifest(
                 "invalid UTF-16BE manifest length".into(),
             ));
         }
-        let units: Vec<u16> = rest
-            .chunks_exact(2)
-            .map(|c| u16::from_be_bytes([c[0], c[1]]))
-            .collect();
+        let units: Vec<u16> = chunks.iter().copied().map(u16::from_be_bytes).collect();
         return String::from_utf16(&units)
             .map_err(|e| AitoolsError::Manifest(format!("invalid UTF-16BE manifest: {e}")));
     }
@@ -1311,5 +1307,46 @@ impl LoadedPlugin {
             created_at: timestamp.to_string(),
             updated_at: timestamp.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_manifest_bytes_handles_utf16_le_be_and_rejects_odd_lengths() {
+        let sample = "{\"name\":\"工具箱\"}";
+        let utf16_units: Vec<u16> = sample.encode_utf16().collect();
+
+        let mut le_bytes = vec![0xFF, 0xFE];
+        for unit in &utf16_units {
+            le_bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        assert_eq!(decode_manifest_bytes(&le_bytes).unwrap(), sample);
+
+        let mut be_bytes = vec![0xFE, 0xFF];
+        for unit in &utf16_units {
+            be_bytes.extend_from_slice(&unit.to_be_bytes());
+        }
+        assert_eq!(decode_manifest_bytes(&be_bytes).unwrap(), sample);
+
+        let odd_le = [0xFF, 0xFE, b'{', 0x00, b'}'];
+        let le_err = decode_manifest_bytes(&odd_le).unwrap_err();
+        assert!(
+            le_err
+                .to_string()
+                .contains("invalid UTF-16LE manifest length"),
+            "unexpected LE error: {le_err}"
+        );
+
+        let odd_be = [0xFE, 0xFF, 0x00, b'{', b'}'];
+        let be_err = decode_manifest_bytes(&odd_be).unwrap_err();
+        assert!(
+            be_err
+                .to_string()
+                .contains("invalid UTF-16BE manifest length"),
+            "unexpected BE error: {be_err}"
+        );
     }
 }
