@@ -2,9 +2,29 @@
   "id": "translation",
   "name": "AI Translator",
   "version": "2.0.0",
+  "description": "Multilingual technical translator across EN, ZH, JA, and KO using balanced AI routing.",
   "runtime": "native-ui",
   "main": "index.html",
   "permissions": ["clipboard.read", "clipboard.write", "ai.balanced", "notification"],
+  "features": [
+    {
+      "code": "translate",
+      "label": "AI Translator",
+      "explain": "Translate technical prose, errors, and UI copy across EN, ZH, JA, and KO",
+      "cmds": [
+        "translate",
+        "translator",
+        "翻译",
+        "中英互译",
+        {
+          "type": "over",
+          "label": "Translate selected text",
+          "minLength": 2,
+          "maxLength": 4000
+        }
+      ]
+    }
+  ],
   "ai_tools": [
     {
       "name": "translate_text",

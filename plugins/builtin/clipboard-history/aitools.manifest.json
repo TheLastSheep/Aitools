@@ -2,9 +2,19 @@
   "id": "clipboard-history",
   "name": "Clipboard History",
   "version": "2.0.0",
+  "description": "Search, copy, pin, and AI-summarize clipboard history persisted in isolated LMDB.",
   "runtime": "native-ui",
   "main": "index.html",
   "permissions": ["clipboard.read", "clipboard.write", "db.read", "db.write", "ai.fast"],
+  "features": [
+    {
+      "code": "clipboard-history",
+      "label": "Clipboard History",
+      "explain": "Search, copy, pin, and summarize recent clipboard snippets",
+      "mainPush": true,
+      "cmds": ["clipboard", "clip", "history", "剪贴板", "历史记录"]
+    }
+  ],
   "ai_tools": [
     {
       "name": "search_clipboard",

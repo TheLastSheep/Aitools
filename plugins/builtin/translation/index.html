@@ -2,29 +2,66 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AI Translator</title>
+    <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <main id="app">
-      <h1>AI Translator</h1>
-      <textarea id="source" rows="5" placeholder="Paste or select text to translate..."></textarea>
-      <button id="translate-btn" type="button">Translate to English</button>
-      <pre id="result"></pre>
+    <main id="app" class="plugin-shell">
+      <header class="plugin-header">
+        <div>
+          <h1>AI Translator</h1>
+          <p class="subtitle">Preserves technical identifiers and inline code spans</p>
+        </div>
+        <div class="controls-row">
+          <label class="field-inline">
+            <span>Target</span>
+            <select id="target-lang" class="select" aria-label="Target language">
+              <option value="English">English</option>
+              <option value="Simplified Chinese (简体中文)">简体中文</option>
+              <option value="Japanese (日本語)">日本語</option>
+              <option value="Korean (한국어)">한국어</option>
+            </select>
+          </label>
+          <label class="field-inline">
+            <span>Profile</span>
+            <select id="profile" class="select" aria-label="AI model profile">
+              <option value="balanced" selected>Balanced</option>
+              <option value="fast">Fast</option>
+              <option value="deep">Deep</option>
+            </select>
+          </label>
+        </div>
+      </header>
+
+      <section class="editor-card">
+        <div class="card-bar">
+          <span class="label">Source Text</span>
+          <span id="char-count" class="muted">0 chars</span>
+        </div>
+        <textarea
+          id="source"
+          class="textarea"
+          rows="6"
+          aria-label="Source text to translate"
+          placeholder="Paste or type text to translate..."
+        ></textarea>
+        <div class="card-actions">
+          <button id="clear-btn" class="btn btn-secondary" type="button">Clear</button>
+          <button id="translate-btn" class="btn btn-primary" type="button">Translate</button>
+        </div>
+      </section>
+
+      <div id="status" class="status hidden" role="status" aria-live="polite"></div>
+
+      <section class="editor-card">
+        <div class="card-bar">
+          <span class="label">Translation</span>
+          <button id="copy-btn" class="btn btn-ghost" type="button" disabled>Copy</button>
+        </div>
+        <pre id="result" class="result-output">Translation will appear here.</pre>
+      </section>
     </main>
-    <script type="module">
-      const invoke = window.__TAURI_INTERNALS__?.invoke;
-      document.getElementById('translate-btn').addEventListener('click', async () => {
-        if (!invoke) return;
-        const text = document.getElementById('source').value;
-        const output = await invoke('plugin:aitools|ai_chat', {
-          request: {
-            profile: 'balanced',
-            system: 'Preserve technical terms and code spans.',
-            prompt: `Translate to English:\n${text}`
-          }
-        });
-        document.getElementById('result').textContent = output;
-      });
-    </script>
+    <script type="module" src="./main.js"></script>
   </body>
 </html>

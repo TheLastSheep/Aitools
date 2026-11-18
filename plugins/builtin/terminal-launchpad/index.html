@@ -2,24 +2,44 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Terminal Launchpad</title>
+    <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <main id="app">
-      <h1>Terminal Shortcuts &amp; Launchpad</h1>
-      <ul id="shortcuts"></ul>
+    <main id="app" class="plugin-shell">
+      <header class="plugin-header">
+        <div>
+          <h1>Terminal Launchpad</h1>
+          <p class="subtitle">Project working directories and command shortcuts</p>
+        </div>
+        <span id="count-badge" class="badge">0 shortcuts</span>
+      </header>
+
+      <input
+        id="filter"
+        class="input"
+        type="search"
+        aria-label="Filter terminal shortcuts"
+        placeholder="Search shortcut name, cwd, or command..."
+      />
+
+      <form id="shortcut-form" class="shortcut-form">
+        <div class="form-row">
+          <input id="name-input" class="input" type="text" placeholder="Shortcut name (e.g. dev-api)" required />
+          <input id="cwd-input" class="input mono" type="text" placeholder="Working dir (optional, e.g. ~/code/app)" />
+        </div>
+        <div class="form-row">
+          <input id="cmd-input" class="input mono" type="text" placeholder="Command (e.g. pnpm dev --port 3000)" required />
+          <button class="btn btn-primary" type="submit">Add Shortcut</button>
+        </div>
+      </form>
+
+      <div id="status" class="status hidden" role="status" aria-live="polite"></div>
+
+      <ul id="shortcuts" class="item-list" aria-label="Saved terminal shortcuts"></ul>
+      <div id="empty" class="empty-state hidden">No terminal shortcuts saved yet.</div>
     </main>
-    <script type="module">
-      const invoke = window.__TAURI_INTERNALS__?.invoke;
-      const list = document.getElementById('shortcuts');
-      if (invoke) {
-        const docs = await invoke('plugin:aitools|db_all_docs', { prefix: 'cmd:' });
-        for (const doc of docs) {
-          const li = document.createElement('li');
-          li.textContent = `${doc._id}: ${doc.data?.command ?? ''}`;
-          list.appendChild(li);
-        }
-      }
-    </script>
+    <script type="module" src="./main.js"></script>
   </body>
 </html>

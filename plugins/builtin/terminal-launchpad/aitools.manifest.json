@@ -2,9 +2,18 @@
   "id": "terminal-launchpad",
   "name": "Terminal Shortcuts & Project Launchpad",
   "version": "1.1.0",
+  "description": "Persist named project directories, dev-server commands, and port profiles.",
   "runtime": "native-ui",
   "main": "index.html",
   "permissions": ["shell.exec", "db.read", "db.write", "ai.fast"],
+  "features": [
+    {
+      "code": "terminal-launchpad",
+      "label": "Terminal Launchpad",
+      "explain": "Save, search, and copy terminal command shortcuts and project dev profiles",
+      "cmds": ["terminal", "launchpad", "shell", "cmd", "终端", "快捷命令"]
+    }
+  ],
   "ai_tools": [
     {
       "name": "list_project_shortcuts",

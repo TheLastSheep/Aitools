@@ -2,12 +2,73 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Snipaste Pro (Legacy Compat)</title>
+    <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <main>
-      <h1>Snipaste Pro (Tier 1 Legacy Compat)</h1>
-      <p>Triple-global window.aitools / window.ztools / window.utools &amp; QuickJS preload proxy ready.</p>
+    <main id="app" class="plugin-shell">
+      <header class="plugin-header">
+        <div>
+          <h1>Snipaste &amp; Color Inspector</h1>
+          <p class="subtitle">Color format converter, pinned notes, and OCR quick actions</p>
+        </div>
+        <span id="enter-mode" class="badge">Ready</span>
+      </header>
+
+      <section class="panel-card">
+        <div class="section-head">
+          <h2>Color Inspector</h2>
+          <span id="color-preview-hex" class="mono muted">#5b21b6</span>
+        </div>
+        <div class="color-row">
+          <div id="swatch" class="swatch" aria-hidden="true"></div>
+          <input
+            id="color-input"
+            class="input mono"
+            type="text"
+            aria-label="Color value (HEX or RGB)"
+            value="#5b21b6"
+            placeholder="#5b21b6 or rgb(91, 33, 182)"
+          />
+        </div>
+        <div class="conversions">
+          <div class="conv-item">
+            <span class="conv-label">HEX</span>
+            <code id="out-hex" class="conv-val">#5B21B6</code>
+            <button type="button" class="btn btn-ghost copy-conv" data-target="out-hex">Copy</button>
+          </div>
+          <div class="conv-item">
+            <span class="conv-label">RGB</span>
+            <code id="out-rgb" class="conv-val">rgb(91, 33, 182)</code>
+            <button type="button" class="btn btn-ghost copy-conv" data-target="out-rgb">Copy</button>
+          </div>
+          <div class="conv-item">
+            <span class="conv-label">HSL</span>
+            <code id="out-hsl" class="conv-val">hsl(263, 69%, 42%)</code>
+            <button type="button" class="btn btn-ghost copy-conv" data-target="out-hsl">Copy</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel-card">
+        <h2>Pinned Floating Notes</h2>
+        <form id="pin-form" class="pin-form">
+          <input
+            id="pin-input"
+            class="input"
+            type="text"
+            aria-label="Text or color code to pin"
+            placeholder="Pin text, color hex, or OCR note..."
+            required
+          />
+          <button class="btn btn-primary" type="submit">Pin Note</button>
+        </form>
+        <div id="status" class="status hidden" role="status" aria-live="polite"></div>
+        <ul id="pins" class="pin-list" aria-label="Pinned items"></ul>
+        <div id="empty" class="empty-state hidden">No pinned items yet.</div>
+      </section>
     </main>
+    <script defer src="./main.js"></script>
   </body>
 </html>

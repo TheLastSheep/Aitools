@@ -2,9 +2,18 @@
   "id": "timestamp-calc",
   "name": "Timestamp & Expression Calculator",
   "version": "1.0.0",
+  "description": "High-frequency Rust/Wasm Unix timestamp converter and deterministic expression calculator.",
   "runtime": "rust-wasm",
   "wasm_entry": "plugin.wasm",
   "permissions": ["clipboard.read", "clipboard.write"],
+  "features": [
+    {
+      "code": "convert_timestamp",
+      "label": "Timestamp & Calculator",
+      "explain": "Convert Unix epoch timestamps to ISO-8601 UTC and evaluate math expressions",
+      "cmds": ["timestamp", "unix", "epoch", "calc", "时间戳", "计算器"]
+    }
+  ],
   "ai_tools": [
     {
       "name": "convert_timestamp",

@@ -2,20 +2,46 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Developer Quick Reference</title>
+    <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <main id="app">
-      <h1>Developer Quick Reference</h1>
-      <p>Rust std · Tauri v2 Capabilities · HTTP Status Codes · RegExp</p>
-      <pre id="bookmarks"></pre>
+    <main id="app" class="plugin-shell">
+      <header class="plugin-header">
+        <div>
+          <h1>Developer Quick Reference</h1>
+          <p class="subtitle">Offline cheat sheets &amp; custom snippet bookmarks</p>
+        </div>
+        <div class="tab-group" role="tablist" aria-label="Reference category">
+          <button type="button" class="tab active" data-cat="all" role="tab" aria-selected="true">All</button>
+          <button type="button" class="tab" data-cat="rust" role="tab" aria-selected="false">Rust</button>
+          <button type="button" class="tab" data-cat="tauri" role="tab" aria-selected="false">Tauri v2</button>
+          <button type="button" class="tab" data-cat="http" role="tab" aria-selected="false">HTTP</button>
+          <button type="button" class="tab" data-cat="regex" role="tab" aria-selected="false">RegExp</button>
+          <button type="button" class="tab" data-cat="bookmarks" role="tab" aria-selected="false">Bookmarks</button>
+        </div>
+      </header>
+
+      <input
+        id="search"
+        class="input"
+        type="search"
+        aria-label="Filter reference topics"
+        placeholder="Search Rust, Tauri, HTTP status codes, RegExp, or bookmarks..."
+      />
+
+      <form id="bookmark-form" class="bookmark-form">
+        <input id="bm-title" class="input" type="text" placeholder="Bookmark title" required />
+        <input id="bm-snippet" class="input mono" type="text" placeholder="Command or snippet" required />
+        <button class="btn btn-primary" type="submit">Save Bookmark</button>
+      </form>
+
+      <div id="status" class="status hidden" role="status" aria-live="polite"></div>
+
+      <section id="cards" class="card-grid" aria-label="Reference cards"></section>
+      <div id="empty" class="empty-state hidden">No reference entries matched your filter.</div>
     </main>
-    <script type="module">
-      const invoke = window.__TAURI_INTERNALS__?.invoke;
-      if (invoke) {
-        const docs = await invoke('plugin:aitools|db_all_docs', { prefix: 'doc:' });
-        document.getElementById('bookmarks').textContent = JSON.stringify(docs, null, 2);
-      }
-    </script>
+    <script type="module" src="./main.js"></script>
   </body>
 </html>

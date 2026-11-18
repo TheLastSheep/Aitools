@@ -2,33 +2,51 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Clipboard History</title>
+    <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <main id="app">
-      <h1>Clipboard History</h1>
-      <input id="filter" placeholder="Search pinned & recent clips..." />
-      <ul id="clips"></ul>
+    <main id="app" class="plugin-shell">
+      <header class="plugin-header">
+        <div>
+          <h1>Clipboard History</h1>
+          <p class="subtitle">Search, copy, pin, and summarize snippets</p>
+        </div>
+        <div class="tab-group" role="tablist" aria-label="Clip filter">
+          <button type="button" class="tab active" data-filter="all" role="tab" aria-selected="true">All</button>
+          <button type="button" class="tab" data-filter="pinned" role="tab" aria-selected="false">Pinned</button>
+        </div>
+      </header>
+
+      <section class="toolbar">
+        <input
+          id="filter"
+          class="input"
+          type="search"
+          aria-label="Filter clipboard history"
+          placeholder="Search clipboard snippets..."
+        />
+        <button id="summarize-btn" class="btn btn-secondary" type="button">Summarize</button>
+      </section>
+
+      <form id="add-form" class="add-form">
+        <input
+          id="new-clip"
+          class="input"
+          type="text"
+          aria-label="Save a new snippet"
+          placeholder="Save a new snippet or note..."
+        />
+        <button class="btn btn-primary" type="submit">Save</button>
+      </form>
+
+      <div id="status" class="status hidden" role="status" aria-live="polite"></div>
+      <div id="summary-box" class="summary-box hidden" aria-live="polite"></div>
+
+      <ul id="clips" class="item-list" aria-label="Saved clips"></ul>
+      <div id="empty" class="empty-state hidden">No clipboard snippets found yet.</div>
     </main>
-    <script type="module">
-      const invoke = window.__TAURI_INTERNALS__?.invoke;
-      const list = document.getElementById('clips');
-
-      async function refresh(prefix = 'clip:') {
-        if (!invoke) return;
-        const docs = await invoke('plugin:aitools|db_all_docs', { prefix });
-        list.innerHTML = '';
-        for (const doc of docs) {
-          const li = document.createElement('li');
-          li.textContent = doc.data?.text ?? doc._id;
-          list.appendChild(li);
-        }
-      }
-
-      document.getElementById('filter').addEventListener('input', (e) => {
-        refresh('clip:' + (e.target.value || ''));
-      });
-      refresh();
-    </script>
+    <script type="module" src="./main.js"></script>
   </body>
 </html>

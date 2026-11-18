@@ -2,9 +2,18 @@
   "id": "json-codec",
   "name": "JSON Formatter & Codec",
   "version": "1.0.0",
+  "description": "Zero-Webview Rust/Wasm JSON formatter, validator, and Base64/URL codec.",
   "runtime": "rust-wasm",
   "wasm_entry": "plugin.wasm",
   "permissions": ["clipboard.read", "clipboard.write"],
+  "features": [
+    {
+      "code": "format_json",
+      "label": "JSON Formatter & Codec",
+      "explain": "Validate, prettify, and Base64/URL encode payloads inside Wasm sandbox",
+      "cmds": ["json", "format json", "base64", "url encode", "格式化", "编解码"]
+    }
+  ],
   "ai_tools": [
     {
       "name": "format_json",

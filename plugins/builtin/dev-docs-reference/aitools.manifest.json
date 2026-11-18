@@ -2,9 +2,18 @@
   "id": "dev-docs-reference",
   "name": "Developer Quick Reference",
   "version": "1.0.0",
+  "description": "Offline cheat sheets for Rust std, Tauri v2, HTTP status codes, and RegExp with custom bookmarks.",
   "runtime": "native-ui",
   "main": "index.html",
   "permissions": ["db.read", "db.write", "ai.fast"],
+  "features": [
+    {
+      "code": "dev-docs",
+      "label": "Dev Quick Reference",
+      "explain": "Browse offline Rust, Tauri v2, HTTP, and RegExp cheat sheets and bookmarks",
+      "cmds": ["docs", "reference", "http", "regex", "rust docs", "开发速查", "文档"]
+    }
+  ],
   "ai_tools": [
     {
       "name": "lookup_dev_doc",

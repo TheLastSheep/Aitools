@@ -2,23 +2,46 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>ToDo (Legacy Compat)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ToDo Quick Checklist</title>
+    <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <main>
-      <h1>ToDo Quick Checklist (Tier 1 Legacy Compat)</h1>
-      <ul id="todos"></ul>
+    <main id="app" class="plugin-shell">
+      <header class="plugin-header">
+        <div>
+          <h1>ToDo Quick Checklist</h1>
+          <p class="subtitle">Persisted via ZTools / uTools synchronous storage</p>
+        </div>
+        <div class="tab-group" role="tablist" aria-label="Todo status filter">
+          <button type="button" class="tab active" data-filter="all" role="tab" aria-selected="true">All</button>
+          <button type="button" class="tab" data-filter="active" role="tab" aria-selected="false">Active</button>
+          <button type="button" class="tab" data-filter="done" role="tab" aria-selected="false">Done</button>
+        </div>
+      </header>
+
+      <form id="todo-form" class="add-form">
+        <input
+          id="todo-input"
+          class="input"
+          type="text"
+          aria-label="New todo task"
+          placeholder="Add a task and press Enter..."
+          required
+        />
+        <button class="btn btn-primary" type="submit">Add</button>
+      </form>
+
+      <div id="status" class="status hidden" role="status" aria-live="polite"></div>
+
+      <ul id="todos" class="item-list" aria-label="Todo items"></ul>
+      <div id="empty" class="empty-state hidden">No tasks in this view.</div>
+
+      <footer class="plugin-footer">
+        <span id="summary-count" class="muted">0 remaining</span>
+        <button id="clear-done" class="btn btn-ghost" type="button">Clear Completed</button>
+      </footer>
     </main>
-    <script>
-      if (window.utools && window.utools.db) {
-        const docs = window.utools.db.allDocs('todo:') || [];
-        const ul = document.getElementById('todos');
-        for (const doc of docs) {
-          const li = document.createElement('li');
-          li.textContent = doc.text || doc._id;
-          ul.appendChild(li);
-        }
-      }
-    </script>
+    <script defer src="./main.js"></script>
   </body>
 </html>
