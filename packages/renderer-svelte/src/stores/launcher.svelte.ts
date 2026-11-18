@@ -1,4 +1,5 @@
 import {
+  featuredHomeItems,
   fetchDshLogs,
   fetchZeroQuerySuggestions,
   hideMainWindow,
@@ -64,6 +65,11 @@ export function createLauncherStore() {
   let traceId = $state("wake-0");
   let chips = $state<ContextChip[]>([]);
   let suggestions = $state<QuickAgentAction[]>([]);
+  let homeItems = $state<LauncherHit[]>([]);
+  let homeExpanded = $state(false);
+  let hasWoken = $state(false);
+  let homeSelectedIndex = $state(-1);
+  let lastWakeTraceId = "";
   let hits = $state<LauncherHit[]>([]);
   let selectedIndex = $state(0);
   let searchLoading = $state(false);
@@ -136,10 +142,29 @@ export function createLauncherStore() {
     setThemePreference(next);
   }
 
+  async function refreshHomeItems(limit = 27) {
+    homeItems = await featuredHomeItems(limit);
+  }
+
+  function toggleHomeExpanded() {
+    homeExpanded = !homeExpanded;
+  }
+
+  function moveHomeSelection(delta: number) {
+    const visibleCount = homeExpanded ? homeItems.length : Math.min(18, homeItems.length);
+    if (visibleCount <= 0) return;
+    if (homeSelectedIndex < 0) {
+      homeSelectedIndex = delta >= 0 ? 0 : visibleCount - 1;
+      return;
+    }
+    homeSelectedIndex = (homeSelectedIndex + delta + visibleCount) % visibleCount;
+  }
+
   async function onQueryChange(next: string) {
     query = next;
     searchError = null;
     statusBanner = null;
+    homeSelectedIndex = -1;
 
     if (next.startsWith("@") && mode === "search") {
       mode = "agent";
@@ -363,6 +388,13 @@ export function createLauncherStore() {
         await launchHit(hits[idx]);
         return;
       }
+      if (!query.trim() && homeSelectedIndex >= 0) {
+        const visibleCount = homeExpanded ? homeItems.length : Math.min(18, homeItems.length);
+        if (homeSelectedIndex < visibleCount && homeItems[homeSelectedIndex]) {
+          await launchHit(homeItems[homeSelectedIndex]);
+          return;
+        }
+      }
       if (query.trim().length > 0) {
         try {
           const decision = await searchFeatures(query, false, true);
@@ -409,6 +441,11 @@ export function createLauncherStore() {
       await onQueryChange("");
       return;
     }
+    hasWoken = false;
+    homeExpanded = false;
+    homeSelectedIndex = -1;
+    chips = [];
+    suggestions = [];
     await hideMainWindow();
   }
 
@@ -577,7 +614,12 @@ export function createLauncherStore() {
     if (dshStandalone) {
       await refreshDshLogs();
     } else {
-      suggestions = await fetchZeroQuerySuggestions();
+      const [initialSuggestions, initialHome] = await Promise.all([
+        fetchZeroQuerySuggestions(),
+        featuredHomeItems(27),
+      ]);
+      suggestions = initialSuggestions;
+      homeItems = initialHome;
     }
 
     if (!isTauriRuntime()) {
@@ -611,21 +653,41 @@ export function createLauncherStore() {
       // Optional window theme listener unavailable.
     }
 
-    if (!dshStandalone) {
-      const ch = new Channel<{
-        traceId: string;
-        chips: ContextChip[];
-        suggestions: QuickAgentAction[];
-      }>();
-      ch.onmessage = (payload) => {
-        traceId = payload.traceId;
-        chips = payload.chips;
-        suggestions = payload.suggestions;
-        statusBanner = null;
-        searchError = null;
+    type WakePayloadMsg = {
+      traceId: string;
+      chips: ContextChip[];
+      suggestions: QuickAgentAction[];
+    };
+
+    const applyWakePayload = (payload: WakePayloadMsg) => {
+      const isDuplicate = payload.traceId && payload.traceId === lastWakeTraceId && hasWoken;
+      lastWakeTraceId = payload.traceId || lastWakeTraceId;
+      traceId = payload.traceId;
+      chips = payload.chips ?? [];
+      suggestions = payload.suggestions ?? [];
+      hasWoken = true;
+      homeSelectedIndex = -1;
+      statusBanner = null;
+      searchError = null;
+      if (!isDuplicate) {
+        if (homeItems.length === 0) {
+          void refreshHomeItems(27);
+        }
         void ingestFrontendLog("INFO", "renderer::paint", "Wake payload received", payload.traceId);
-      };
+      }
+    };
+
+    if (!dshStandalone) {
+      const ch = new Channel<WakePayloadMsg>();
+      ch.onmessage = applyWakePayload;
       await invoke("register_wake_channel", { channel: ch });
+
+      const unlistenWake = await listen<WakePayloadMsg>("aitools://wake", (event) => {
+        if (event.payload) {
+          applyWakePayload(event.payload);
+        }
+      });
+      cleanups.push(unlistenWake);
     }
 
     const unlistenDsh = await listen("aitools://toggle-dsh", () => {
@@ -666,6 +728,11 @@ export function createLauncherStore() {
     get traceId() { return traceId; },
     get chips() { return chips; },
     get suggestions() { return suggestions; },
+    get homeItems() { return homeItems; },
+    get homeExpanded() { return homeExpanded; },
+    get hasWoken() { return hasWoken; },
+    get homeSelectedIndex() { return homeSelectedIndex; },
+    set homeSelectedIndex(v: number) { homeSelectedIndex = v; },
     get hits() { return hits; },
     get selectedIndex() { return selectedIndex; },
     set selectedIndex(v: number) { selectedIndex = v; },
@@ -701,6 +768,9 @@ export function createLauncherStore() {
     setDraftQuery,
     setThemePreference,
     cycleTheme,
+    refreshHomeItems,
+    toggleHomeExpanded,
+    moveHomeSelection,
     onQueryChange,
     promoteToAgent,
     exitAgentToSearch,

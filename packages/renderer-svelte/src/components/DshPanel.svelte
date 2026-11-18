@@ -1,5 +1,10 @@
 <script lang="ts">
-  import type { FaultInjectionConfig, LogRecord, SyncZtoolsResult } from "../lib/ipc";
+  import type {
+    FaultInjectionConfig,
+    LogRecord,
+    SyncZtoolsResult,
+    ThemePreference,
+  } from "../lib/ipc";
 
   let {
     logs,
@@ -10,6 +15,8 @@
     faultError = null,
     syncPending = false,
     lastSyncResult = null,
+    themePreference = "system",
+    onChangeTheme,
     onRefresh,
     onToggleFault,
     onSyncPlugins,
@@ -23,6 +30,8 @@
     faultError?: string | null;
     syncPending?: boolean;
     lastSyncResult?: SyncZtoolsResult | null;
+    themePreference?: ThemePreference;
+    onChangeTheme?: (next: ThemePreference) => void;
     onRefresh: () => void;
     onToggleFault: (key: keyof FaultInjectionConfig) => void;
     onSyncPlugins?: () => void;
@@ -65,6 +74,21 @@
         placeholder="Filter trace_id..."
         bind:value={traceFilter}
       />
+      {#if onChangeTheme}
+        <div class="theme-group" role="group" aria-label="Theme preference">
+          {#each [["system", "Auto"], ["light", "Light"], ["dark", "Dark"]] as [pref, text] (pref)}
+            <button
+              type="button"
+              class="theme-opt"
+              class:active={themePreference === pref}
+              aria-pressed={themePreference === pref}
+              onclick={() => onChangeTheme(pref as ThemePreference)}
+            >
+              {text}
+            </button>
+          {/each}
+        </div>
+      {/if}
       {#if onSyncPlugins}
         <button
           type="button"
@@ -247,6 +271,36 @@
     transform: scale(0.98);
   }
 
+  .theme-group {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-strong);
+    background: var(--bg-elevated);
+    gap: 2px;
+  }
+
+  .theme-opt {
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--text-secondary);
+    min-height: 24px;
+  }
+
+  .theme-opt:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .theme-opt.active {
+    background: var(--accent-subtle);
+    color: var(--accent-text);
+    font-weight: 600;
+  }
+
   .fault-bar {
     display: flex;
     flex-wrap: wrap;
@@ -267,7 +321,7 @@
     padding: 2px var(--space-2);
     border-radius: var(--radius-pill);
     background: var(--accent-subtle);
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
 
@@ -298,7 +352,7 @@
 
   .dsh-alert.info {
     background: var(--accent-subtle);
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   .waterfall {
@@ -346,7 +400,7 @@
 
   .lvl-info {
     background: var(--accent-subtle);
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   .lvl-debug {
@@ -376,7 +430,7 @@
   }
 
   .trace {
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   .src {

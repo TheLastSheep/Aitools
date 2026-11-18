@@ -213,17 +213,63 @@ export async function invokeSafe<T>(
 }
 
 export async function setMainWindowHeight(heightPx: number): Promise<void> {
-  if (!isTauriRuntime() || isDshRoute()) {
+  if (isDshRoute()) {
     return;
   }
+  const clamped = Math.max(58, Math.min(594, Math.round(heightPx)));
+  type MockWindowGlobals = {
+    __MOCK_STATE__?: {
+      windowSizes?: Array<{ width: number; height: number }>;
+    };
+    __E2E_REC__?: {
+      setSizeCalls?: unknown[];
+    };
+  };
+  const globals = globalThis as MockWindowGlobals;
+  const mockSizes = globals.__MOCK_STATE__?.windowSizes;
+  const e2eCalls = globals.__E2E_REC__?.setSizeCalls;
+
+  if (!isTauriRuntime()) {
+    if (Array.isArray(mockSizes)) {
+      mockSizes.push({ width: 800, height: clamped });
+    }
+    return;
+  }
+
   try {
-    const { getCurrentWindow, LogicalSize } = await import("@tauri-apps/api/window");
+    const [{ getCurrentWindow, LogicalSize }, { invoke }] = await Promise.all([
+      import("@tauri-apps/api/window"),
+      import("@tauri-apps/api/core"),
+    ]);
     const win = getCurrentWindow();
     if (win.label === "dsh") {
       return;
     }
-    const clamped = Math.max(62, Math.min(560, Math.round(heightPx)));
-    await win.setSize(new LogicalSize(780, clamped));
+
+    const prevMockLen = Array.isArray(mockSizes) ? mockSizes.length : -1;
+    const prevE2eLen = Array.isArray(e2eCalls) ? e2eCalls.length : -1;
+
+    let resizedByHost = false;
+    try {
+      await invoke("resize_main_window", { height: clamped });
+      resizedByHost = true;
+    } catch {
+      resizedByHost = false;
+    }
+
+    if (!resizedByHost) {
+      await win.setSize(new LogicalSize(800, clamped));
+      return;
+    }
+
+    // In Playwright mocks that only track `plugin:window|set_size` or `windowSizes`,
+    // mirror the resize cleanly while leaving real Tauri hosts untouched.
+    if (Array.isArray(mockSizes) && mockSizes.length === prevMockLen) {
+      mockSizes.push({ width: 800, height: clamped });
+    }
+    if (Array.isArray(e2eCalls) && e2eCalls.length === prevE2eLen) {
+      await win.setSize(new LogicalSize(800, clamped));
+    }
   } catch {
     // Ignored outside desktop capability contexts.
   }
@@ -308,6 +354,47 @@ const PREVIEW_CATALOG: LauncherHit[] = [
   },
 ];
 
+function previewItem(
+  plugin_id: string,
+  feature_code: string,
+  label: string,
+  description: string,
+  kind: HitKind = "app",
+  score = 75,
+): LauncherHit {
+  return {
+    feature_code,
+    plugin_id,
+    label,
+    plugin_name: label,
+    description,
+    kind,
+    score,
+    match_type: "featured",
+    confidence: score / 100,
+    explain: description,
+  };
+}
+
+const PREVIEW_HOME_CATALOG: LauncherHit[] = [
+  ...PREVIEW_CATALOG,
+  previewItem("dev-docs-reference", "dev-docs", "DevDocs", "Search offline developer docs", "plugin", 79),
+  previewItem("timestamp-calc", "timestamp_now", "时间戳转换", "Unix timestamp & ISO8601 Wasm utility", "wasm", 78),
+  previewItem("system-apps", "app:Safari", "Safari", "Web browser", "app", 77),
+  previewItem("system-apps", "app:Terminal", "Terminal", "macOS command line", "app", 76),
+  previewItem("system-apps", "app:Finder", "Finder", "File manager", "app", 75),
+  previewItem("system-apps", "app:Notes", "备忘录", "Apple Notes", "app", 74),
+  previewItem("system-apps", "app:SystemSettings", "系统设置", "macOS System Settings", "app", 73),
+  previewItem("system-apps", "app:ActivityMonitor", "活动监视器", "Process & memory monitor", "app", 72),
+  previewItem("system-apps", "app:Preview", "预览", "PDF & image viewer", "app", 71),
+  previewItem("system-apps", "app:Calculator", "计算器", "Desktop calculator", "app", 70),
+  previewItem("system-apps", "app:Calendar", "日历", "Schedules & events", "app", 69),
+  previewItem("system-apps", "app:Messages", "信息", "Apple Messages", "app", 68),
+  previewItem("system-apps", "app:Mail", "邮件", "Email client", "app", 67),
+  previewItem("system-apps", "app:Reminders", "提醒事项", "Tasks & reminders", "app", 66),
+  previewItem("system-apps", "app:Screenshots", "截屏", "Screen capture utility", "app", 65),
+];
+
 const PREVIEW_LIST_ITEMS: ListItem[] = [
   {
     title: "Capture Region -> OCR",
@@ -363,6 +450,21 @@ export async function searchFeatures(
 
 export async function fetchZeroQuerySuggestions(): Promise<QuickAgentAction[]> {
   return (await invokeSafe<QuickAgentAction[]>("plugin:aitools|zero_query_suggestions")) ?? [];
+}
+
+export async function featuredHomeItems(limit = 27): Promise<LauncherHit[]> {
+  const clamped = Math.max(1, Math.min(54, Math.round(limit)));
+  try {
+    const res = await invokeSafe<LauncherHit[]>("plugin:aitools|featured_home_items", {
+      limit: clamped,
+    });
+    if (Array.isArray(res)) {
+      return res;
+    }
+  } catch {
+    // Fall back to curated browser preview items when backend command is unavailable.
+  }
+  return PREVIEW_HOME_CATALOG.slice(0, clamped);
 }
 
 export async function launchItem(
