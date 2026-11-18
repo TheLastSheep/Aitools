@@ -1,26 +1,32 @@
-//! `tauri-plugin-aitools` — Integrates core, native, AI, JS bridge, and Wasm host into Tauri v2 (`SPEC-000`, `SPEC-004`, `SPEC-006`).
+//! `tauri-plugin-aitools` — Integrates core, native, AI, JS bridge, and Wasm host into Tauri v2 (`SPEC-000`, `SPEC-004`, `SPEC-006`, `SPEC-015`, `SPEC-016`).
 
 pub mod protocols;
+pub mod session;
+mod session_ops;
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
 
-use aitools_ai::broker::ModelBroker;
+use aitools_ai::broker::{ModelBroker, ModelProfile, ModelProfileKind, ProviderKind};
 use aitools_ai::context_fusion::{suggest_zero_query_actions, ContextEnvelope, QuickAgentAction};
 use aitools_ai::hitl::PolicyGuard;
 use aitools_ai::launcher::{evaluate_launcher_input, LauncherDecision};
-use aitools_ai::planner::{execute_dag, DagEvent, DagPlan, HitlBroker, HitlResolution};
+use aitools_ai::planner::{
+    execute_agent_prompt, execute_dag, AgentPromptChip, AgentPromptRequest, AgentStreamEvent,
+    AgentTurnResult, DagEvent, DagPlan, HitlBroker, HitlResolution,
+};
 use aitools_ai::registry::ToolRegistry;
 use aitools_core::{
     Document, FeatureEntry, FeatureSearchIndex, PluginDataQuery, PluginDataRemove,
     PluginDataWriteResult, StorageEngine,
 };
 use aitools_js_bridge::{
-    build_initialization_script, invoke_preload_list_feature, CallbackTable, JsBridgeHost,
-    ListPushEvent, ListPushSink,
+    build_initialization_script_with_preload_props, invoke_preload_list_feature, CallbackTable,
+    ExportedWindowProp, JsBridgeHost, ListPushEvent, ListPushSink,
 };
+use aitools_native::context::{ClipboardProvider, SystemClipboard};
 use aitools_telemetry::{LogRecord, TelemetryHandle};
 use aitools_wasm_host::WasmPluginHost;
 use serde::{Deserialize, Serialize};
@@ -28,12 +34,22 @@ use serde_json::{json, Map, Value};
 use tauri::http::{header::CONTENT_TYPE, Response};
 use tauri::ipc::Channel;
 use tauri::plugin::{Builder as PluginBuilder, TauriPlugin};
-use tauri::{AppHandle, Manager, Runtime, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, Manager, Runtime, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+};
+use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_opener::OpenerExt;
 use thiserror::Error;
 
 use crate::protocols::{
-    handle_plugin_asset_request, handle_sync_request, FaultInjectionConfig, PluginMountRegistry,
-    ProtocolReply,
+    handle_plugin_asset_request, handle_sync_request_with_session, FaultInjectionConfig,
+    PluginMountRegistry, ProtocolReply,
+};
+pub use crate::session::{
+    DshPreloadSummary, HostWindowController, KeychainApiKeyProvider, LaunchResult,
+    ListSearchResponse, NoopWindowController, PluginSessionManager, PluginWindowSpec,
+    PreloadPluginStatus, SelectListResult, SessionDependencies, SyncZtoolsResult,
 };
 
 /// Errors returned by public `tauri-plugin-aitools` setup and window builders.
@@ -78,25 +94,33 @@ pub struct AitoolsState {
     /// Registry mapping plugin IDs to canonicalized asset directories.
     pub mounts: PluginMountRegistry,
     /// Hybrid Pinyin and fuzzy feature search index.
-    pub search_index: RwLock<FeatureSearchIndex>,
+    pub search_index: Arc<RwLock<FeatureSearchIndex>>,
     /// Table of active streaming list callbacks for legacy preload features.
     pub callback_table: CallbackTable,
     /// QuickJS-backed host for legacy Tier 1 preload plugins.
     pub js_bridge: Mutex<JsBridgeHost>,
     /// Sandboxed Wasmtime host for Tier 3 plugins.
-    pub wasm_host: WasmPluginHost,
+    pub wasm_host: Arc<WasmPluginHost>,
     /// Registry of built-in and plugin-provided agent tools.
     pub tool_registry: RwLock<ToolRegistry>,
     /// Centralized multi-provider AI model & quota broker.
-    pub model_broker: RwLock<ModelBroker>,
+    pub model_broker: Arc<RwLock<ModelBroker>>,
     /// Risk-tier policy guard enforcing HITL approvals.
     pub policy_guard: Arc<PolicyGuard>,
     /// Broker coordinating pending HITL confirmation steps.
     pub hitl_broker: Arc<HitlBroker>,
     /// Runtime DSH fault injection toggles.
-    pub faults: Mutex<FaultInjectionConfig>,
+    pub faults: Arc<Mutex<FaultInjectionConfig>>,
     /// Most recent pre-focus context captured on global wake.
     pub latest_context: Mutex<Option<ContextEnvelope>>,
+    /// Shared HTTP client reused across Keychain AI calls and preload fetch bridges.
+    pub http_client: reqwest::Client,
+    /// Coordinates loaded ZTools/built-in plugins, 3-tier preloads, and OS bridges.
+    pub sessions: Arc<PluginSessionManager>,
+    /// Indicates an active HITL approval blocking focus-loss auto-hide (`SPEC-016-R3`).
+    pub hitl_active: Arc<AtomicBool>,
+    /// Manual guard suppressing focus-loss auto-hide during window drag/modal state (`SPEC-016-R3`).
+    pub focus_hide_suppressed: Arc<AtomicBool>,
 }
 
 impl fmt::Debug for AitoolsState {
@@ -126,27 +150,98 @@ impl AitoolsState {
         initial_features: &[FeatureEntry],
     ) -> Result<Self> {
         let storage = Arc::new(StorageEngine::open(db_dir)?);
-        let search_index = FeatureSearchIndex::try_build(initial_features)?;
-        let wasm_host = WasmPluginHost::with_defaults()?;
+        let search_index = Arc::new(RwLock::new(FeatureSearchIndex::try_build(
+            initial_features,
+        )?));
+        let mounts = PluginMountRegistry::new();
+        let wasm_host = Arc::new(WasmPluginHost::with_defaults()?);
+        let mut default_broker = ModelBroker::new();
+        default_broker.register_profile(ModelProfile {
+            kind: ModelProfileKind::Fast,
+            provider: ProviderKind::OpenAiCompatible,
+            base_url: std::env::var("AITOOLS_OPENAI_BASE_URL")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+            model: std::env::var("AITOOLS_FAST_MODEL")
+                .unwrap_or_else(|_| "gpt-4o-mini".to_string()),
+            keychain_account: "aitools.ai.fast".to_string(),
+        });
+        default_broker.register_profile(ModelProfile {
+            kind: ModelProfileKind::Balanced,
+            provider: ProviderKind::OpenAiCompatible,
+            base_url: std::env::var("AITOOLS_OPENAI_BASE_URL")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+            model: std::env::var("AITOOLS_BALANCED_MODEL").unwrap_or_else(|_| "gpt-4o".to_string()),
+            keychain_account: "aitools.ai.balanced".to_string(),
+        });
+        default_broker.register_profile(ModelProfile {
+            kind: ModelProfileKind::Deep,
+            provider: ProviderKind::Anthropic,
+            base_url: std::env::var("AITOOLS_ANTHROPIC_BASE_URL")
+                .unwrap_or_else(|_| "https://api.anthropic.com".to_string()),
+            model: std::env::var("AITOOLS_DEEP_MODEL")
+                .unwrap_or_else(|_| "claude-3-5-sonnet-latest".to_string()),
+            keychain_account: "aitools.ai.deep".to_string(),
+        });
+        let model_broker = Arc::new(RwLock::new(default_broker));
+        let faults = Arc::new(Mutex::new(FaultInjectionConfig::default()));
 
         let mut registry = ToolRegistry::new();
         registry.register_builtin_os_defaults();
 
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap_or_default();
+
+        let sessions = PluginSessionManager::new(SessionDependencies {
+            storage: Arc::clone(&storage),
+            telemetry: telemetry.clone(),
+            mounts: mounts.clone(),
+            search_index: Arc::clone(&search_index),
+            wasm_host: Arc::clone(&wasm_host),
+            model_broker: Arc::clone(&model_broker),
+            faults: Arc::clone(&faults),
+            initial_features,
+        });
+
         Ok(Self {
             storage,
             telemetry,
-            mounts: PluginMountRegistry::new(),
-            search_index: RwLock::new(search_index),
+            mounts,
+            search_index,
             callback_table: CallbackTable::new(),
             js_bridge: Mutex::new(JsBridgeHost::new()),
             wasm_host,
             tool_registry: RwLock::new(registry),
-            model_broker: RwLock::new(ModelBroker::new()),
+            model_broker,
             policy_guard: Arc::new(PolicyGuard::new()),
             hitl_broker: Arc::new(HitlBroker::new()),
-            faults: Mutex::new(FaultInjectionConfig::default()),
+            faults,
             latest_context: Mutex::new(None),
+            http_client,
+            sessions,
+            hitl_active: Arc::new(AtomicBool::new(false)),
+            focus_hide_suppressed: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Attaches a live Tauri [`AppHandle`] so plugin windows, notifications, dialogs, and shell openers run natively.
+    pub fn attach_app_handle<R: Runtime>(&self, app: AppHandle<R>) {
+        self.sessions
+            .set_window_controller(Arc::new(TauriHostController { app }));
+    }
+
+    /// Returns `true` when focus-loss auto-hide on the main launcher window should be suppressed (`SPEC-016-R3`).
+    #[must_use]
+    pub fn is_focus_hide_suppressed(&self) -> bool {
+        self.hitl_active.load(Ordering::Relaxed)
+            || self.focus_hide_suppressed.load(Ordering::Relaxed)
+    }
+
+    /// Updates manual focus-loss hide suppression (e.g. during active drag/dialog state).
+    pub fn set_focus_hide_suppressed(&self, suppressed: bool) {
+        self.focus_hide_suppressed
+            .store(suppressed, Ordering::Relaxed);
     }
 }
 
@@ -187,15 +282,214 @@ pub fn build_plugin_window<R: Runtime>(
     width: f64,
     height: f64,
 ) -> Result<WebviewWindow<R>> {
+    build_plugin_window_with_props(app, plugin_id, entry_path, title, width, height, &[])
+}
+
+/// Builds (or returns) a sandboxed child plugin window injecting both triple-global shim and
+/// preload `window.<prop>` RPC stubs (`INV-SEC-02`, `SPEC-015-R4`).
+///
+/// # Errors
+///
+/// Returns [`PluginError::InvalidPluginUrl`] if `plugin_id` or `entry_path` fails validation,
+/// or [`PluginError::Tauri`] if building the window fails.
+pub fn build_plugin_window_with_props<R: Runtime>(
+    app: &AppHandle<R>,
+    plugin_id: &str,
+    entry_path: &str,
+    title: &str,
+    width: f64,
+    height: f64,
+    exported_props: &[ExportedWindowProp],
+) -> Result<WebviewWindow<R>> {
     let label = format!("plugin-{plugin_id}");
-    let url = WebviewUrl::CustomProtocol(parse_plugin_url(plugin_id, entry_path)?);
-    let init_script = build_initialization_script(plugin_id);
+    if let Some(existing) = app.get_webview_window(&label) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(existing);
+    }
+
+    let url = if entry_path.starts_with("http://") || entry_path.starts_with("https://") {
+        let parsed: Url = entry_path
+            .parse()
+            .map_err(|err| PluginError::InvalidPluginUrl {
+                url: entry_path.to_string(),
+                reason: format!("{err}"),
+            })?;
+        WebviewUrl::External(parsed)
+    } else {
+        WebviewUrl::CustomProtocol(parse_plugin_url(plugin_id, entry_path)?)
+    };
+    let init_script = build_initialization_script_with_preload_props(plugin_id, exported_props);
 
     Ok(WebviewWindowBuilder::new(app, label, url)
         .title(title)
         .inner_size(width, height)
         .initialization_script(&init_script)
         .build()?)
+}
+
+struct TauriHostController<R: Runtime> {
+    app: AppHandle<R>,
+}
+
+impl<R: Runtime> HostWindowController for TauriHostController<R> {
+    fn open_plugin_window(
+        &self,
+        spec: PluginWindowSpec<'_>,
+    ) -> std::result::Result<String, String> {
+        let win = build_plugin_window_with_props(
+            &self.app,
+            spec.plugin_id,
+            spec.entry_path,
+            spec.title,
+            spec.width,
+            spec.height,
+            spec.exported_props,
+        )
+        .map_err(|e| e.to_string())?;
+        let label = win.label().to_string();
+        let _ = win.show();
+        let _ = win.set_focus();
+        if let Some(action) = spec.init_action {
+            let js = format!(
+                "if (typeof globalThis.__aitools_dispatch_lifecycle__ === 'function') {{ globalThis.__aitools_dispatch_lifecycle__('pluginEnter', {}); }}",
+                serde_json::to_string(&action).unwrap_or_else(|_| "{}".to_string())
+            );
+            let _ = win.eval(&js);
+        }
+        Ok(label)
+    }
+
+    fn close_plugin_window(&self, plugin_id: &str) -> std::result::Result<(), String> {
+        let label = format!("plugin-{plugin_id}");
+        if let Some(win) = self.app.get_webview_window(&label) {
+            win.close().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn hide_main_window(&self) -> std::result::Result<(), String> {
+        if let Some(win) = self.app.get_webview_window("main") {
+            win.hide().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn show_main_window(&self) -> std::result::Result<(), String> {
+        if let Some(win) = self.app.get_webview_window("main") {
+            win.show().map_err(|e| e.to_string())?;
+            win.set_focus().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn set_expand_height(&self, height: f64) -> std::result::Result<(), String> {
+        if let Some(win) = self.app.get_webview_window("main") {
+            let cur_w = win
+                .inner_size()
+                .ok()
+                .map_or(780.0, |sz| f64::from(sz.width.max(480)));
+            let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(cur_w, height)));
+        }
+        Ok(())
+    }
+
+    fn emit_event(&self, event: &str, payload: Value) {
+        let _ = self.app.emit(event, payload);
+    }
+
+    fn eval_plugin_lifecycle(&self, plugin_id: &str, event: &str, arg1: Value, arg2: Value) {
+        let label = format!("plugin-{plugin_id}");
+        if let Some(win) = self.app.get_webview_window(&label) {
+            let ev_json = serde_json::to_string(event).unwrap_or_else(|_| "\"\"".to_string());
+            let a1_json = serde_json::to_string(&arg1).unwrap_or_else(|_| "null".to_string());
+            let a2_json = serde_json::to_string(&arg2).unwrap_or_else(|_| "null".to_string());
+            let script = format!(
+                "if (typeof globalThis.__aitools_dispatch_lifecycle__ === 'function') {{ globalThis.__aitools_dispatch_lifecycle__({ev_json}, {a1_json}, {a2_json}); }}"
+            );
+            let _ = win.eval(&script);
+        }
+    }
+
+    fn show_notification(
+        &self,
+        title: &str,
+        body: &str,
+        _click_feature_code: Option<&str>,
+    ) -> std::result::Result<(), String> {
+        self.app
+            .notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show()
+            .map_err(|e| e.to_string())
+    }
+
+    fn open_external(&self, url: &str) -> std::result::Result<(), String> {
+        self.app
+            .opener()
+            .open_url(url, None::<&str>)
+            .map_err(|e| e.to_string())
+    }
+
+    fn open_path(&self, path: &str) -> std::result::Result<(), String> {
+        self.app
+            .opener()
+            .open_path(path, None::<&str>)
+            .map_err(|e| e.to_string())
+    }
+
+    fn show_item_in_folder(&self, path: &str) -> std::result::Result<(), String> {
+        self.app
+            .opener()
+            .reveal_item_in_dir(path)
+            .map_err(|e| e.to_string())
+    }
+
+    fn beep(&self) {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("afplay")
+                .arg("/System/Library/Sounds/Tink.aiff")
+                .spawn();
+        }
+    }
+
+    fn show_open_dialog(
+        &self,
+        options: &Value,
+    ) -> std::result::Result<Option<Vec<String>>, String> {
+        let mut builder = self.app.dialog().file();
+        if let Some(title) = options.get("title").and_then(Value::as_str) {
+            builder = builder.set_title(title);
+        }
+        if let Some(dir) = options.get("defaultPath").and_then(Value::as_str) {
+            builder = builder.set_directory(dir);
+        }
+        let multi = options
+            .get("properties")
+            .and_then(Value::as_array)
+            .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some("multiSelections")));
+        if multi {
+            Ok(builder
+                .blocking_pick_files()
+                .map(|list| list.into_iter().map(|p| p.to_string()).collect()))
+        } else {
+            Ok(builder.blocking_pick_file().map(|p| vec![p.to_string()]))
+        }
+    }
+
+    fn show_save_dialog(&self, options: &Value) -> std::result::Result<Option<String>, String> {
+        let mut builder = self.app.dialog().file();
+        if let Some(title) = options.get("title").and_then(Value::as_str) {
+            builder = builder.set_title(title);
+        }
+        if let Some(dir) = options.get("defaultPath").and_then(Value::as_str) {
+            builder = builder.set_directory(dir);
+        }
+        Ok(builder.blocking_save_file().map(|p| p.to_string()))
+    }
 }
 
 struct ChannelListSink {
@@ -228,23 +522,145 @@ pub struct FrontendLogPayload {
 }
 
 #[tauri::command]
-fn search_features(
+fn search_features<R: Runtime>(
     query: String,
     tab_pressed: bool,
     submitted: bool,
+    webview: tauri::Webview<R>,
     state: tauri::State<'_, AitoolsState>,
 ) -> std::result::Result<LauncherDecision, String> {
+    ensure_host_webview(webview.label())?;
     let index = state
         .search_index
         .read()
         .map_err(|_| "search index lock poisoned".to_string())?;
-    evaluate_launcher_input(&index, &query, tab_pressed, submitted).map_err(|e| e.to_string())
+    let mut decision = evaluate_launcher_input(&index, &query, tab_pressed, submitted)
+        .map_err(|e| e.to_string())?;
+    if let LauncherDecision::DeterministicResults {
+        ref mut matches, ..
+    } = decision
+    {
+        for hit in matches.iter_mut() {
+            if let Some(kind) = state
+                .sessions
+                .classify_hit_kind(&hit.plugin_id, &hit.feature_code)
+            {
+                hit.kind = Some(kind);
+            }
+        }
+    }
+    Ok(decision)
 }
 
 #[tauri::command]
-fn zero_query_suggestions(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Tauri IPC command parameters map directly to flat JSON invoke keys"
+)]
+fn launch_item<R: Runtime>(
+    feature_code: String,
+    plugin_id: String,
+    query: String,
+    kind: Option<String>,
+    trace_id: Option<String>,
+    on_list_event: Channel<ListPushEvent>,
+    webview: tauri::Webview<R>,
+    state: tauri::State<'_, AitoolsState>,
+) -> std::result::Result<LaunchResult, String> {
+    ensure_host_webview(webview.label())?;
+    let sink: Arc<dyn ListPushSink> = Arc::new(ChannelListSink {
+        channel: on_list_event,
+    });
+    state.sessions.launch_item(
+        &feature_code,
+        &plugin_id,
+        &query,
+        kind.as_deref(),
+        trace_id.as_deref(),
+        Some(sink),
+    )
+}
+
+#[tauri::command]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Tauri IPC command parameters map directly to flat JSON invoke keys"
+)]
+fn search_list_mode<R: Runtime>(
+    session_id: String,
+    plugin_id: String,
+    feature_code: String,
+    query: String,
+    trace_id: Option<String>,
+    on_list_event: Channel<ListPushEvent>,
+    webview: tauri::Webview<R>,
+    state: tauri::State<'_, AitoolsState>,
+) -> std::result::Result<ListSearchResponse, String> {
+    ensure_host_webview(webview.label())?;
+    let _ = trace_id;
+    let sink: Arc<dyn ListPushSink> = Arc::new(ChannelListSink {
+        channel: on_list_event,
+    });
+    state
+        .sessions
+        .search_list_mode(&session_id, &plugin_id, &feature_code, &query, Some(sink))
+}
+
+#[tauri::command]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Tauri IPC command parameters map directly to flat JSON invoke keys"
+)]
+fn select_list_item<R: Runtime>(
+    session_id: String,
+    plugin_id: String,
+    feature_code: String,
+    item: Value,
+    index: usize,
+    trace_id: Option<String>,
+    webview: tauri::Webview<R>,
+    state: tauri::State<'_, AitoolsState>,
+) -> std::result::Result<SelectListResult, String> {
+    ensure_host_webview(webview.label())?;
+    let _ = trace_id;
+    state
+        .sessions
+        .select_list_item(&session_id, &plugin_id, &feature_code, item, index)
+}
+
+#[tauri::command]
+fn sync_ztools_dir<R: Runtime>(
+    dir_path: Option<String>,
+    webview: tauri::Webview<R>,
+    state: tauri::State<'_, AitoolsState>,
+) -> std::result::Result<SyncZtoolsResult, String> {
+    ensure_host_webview(webview.label())?;
+    let target = match dir_path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(p) => PathBuf::from(p),
+        None => dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".aitools")
+            .join("plugins")
+            .join("ztools"),
+    };
+    Ok(state.sessions.sync_plugins_directory(&target))
+}
+
+#[tauri::command]
+fn dsh_preload_status<R: Runtime>(
+    webview: tauri::Webview<R>,
+    state: tauri::State<'_, AitoolsState>,
+) -> std::result::Result<DshPreloadSummary, String> {
+    ensure_host_webview(webview.label())?;
+    Ok(state.sessions.preload_status_summary())
+}
+
+#[tauri::command]
+fn zero_query_suggestions<R: Runtime>(
+    webview: tauri::Webview<R>,
     state: tauri::State<'_, AitoolsState>,
 ) -> std::result::Result<Vec<QuickAgentAction>, String> {
+    ensure_host_webview(webview.label())?;
     let envelope = state
         .latest_context
         .lock()
@@ -254,12 +670,113 @@ fn zero_query_suggestions(
     Ok(suggest_zero_query_actions(&envelope))
 }
 
+struct ResetBoolGuard(Arc<AtomicBool>);
+
+impl Drop for ResetBoolGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
+fn build_tool_executor(
+    sessions: Arc<PluginSessionManager>,
+) -> Arc<dyn Fn(String, Value) -> aitools_ai::planner::ToolExecFuture + Send + Sync> {
+    Arc::new(move |tool_name: String, args: Value| {
+        let sessions = Arc::clone(&sessions);
+        Box::pin(async move { execute_host_tool(&sessions, &tool_name, args) })
+            as aitools_ai::planner::ToolExecFuture
+    })
+}
+
+fn execute_host_tool(
+    _sessions: &PluginSessionManager,
+    tool_name: &str,
+    args: Value,
+) -> std::result::Result<Value, aitools_ai::AiError> {
+    match tool_name {
+        "os.clipboard.read" => {
+            let text = SystemClipboard
+                .get_text()
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            Ok(json!({ "text": text }))
+        }
+        "os.files.find" => {
+            let query = args
+                .get("pattern")
+                .or_else(|| args.get("query"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let root = args
+                .get("root")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .or_else(dirs::home_dir)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let mut matches = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&root) {
+                for entry in entries.flatten().take(200) {
+                    let path = entry.path();
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with('.') {
+                        continue;
+                    }
+                    if query.is_empty() || name.to_ascii_lowercase().contains(&query) {
+                        matches.push(path.to_string_lossy().to_string());
+                        if matches.len() >= 25 {
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok(json!({ "root": root.to_string_lossy(), "matches": matches }))
+        }
+        "os.shell.run" => {
+            let command = args
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            if command.is_empty() {
+                return Ok(json!({ "ok": false, "stdout": "", "stderr": "empty command" }));
+            }
+            #[cfg(target_os = "windows")]
+            let out = std::process::Command::new("cmd")
+                .args(["/C", command])
+                .output();
+            #[cfg(not(target_os = "windows"))]
+            let out = std::process::Command::new("sh")
+                .args(["-c", command])
+                .output();
+            match out {
+                Ok(output) => Ok(json!({
+                    "ok": output.status.success(),
+                    "status": output.status.code(),
+                    "stdout": String::from_utf8_lossy(&output.stdout),
+                    "stderr": String::from_utf8_lossy(&output.stderr),
+                })),
+                Err(err) => Err(aitools_ai::AiError::Provider(format!(
+                    "shell execution failed: {err}"
+                ))),
+            }
+        }
+        _ => Ok(json!({ "executed": tool_name, "args": args })),
+    }
+}
+
 #[tauri::command]
-async fn run_agent_dag(
-    plan: DagPlan,
-    on_event: Channel<DagEvent>,
+async fn submit_agent_prompt<R: Runtime>(
+    prompt: String,
+    trace_id: String,
+    chips: Vec<AgentPromptChip>,
+    profile: Option<String>,
+    on_event: Channel<AgentStreamEvent>,
+    webview: tauri::Webview<R>,
     state: tauri::State<'_, AitoolsState>,
-) -> std::result::Result<HashMapStringValue, String> {
+) -> std::result::Result<AgentTurnResult, String> {
+    ensure_host_webview(webview.label())?;
     let faults = state
         .faults
         .lock()
@@ -269,22 +786,90 @@ async fn run_agent_dag(
         return Err("DSH fault injected: LLM stream aborted".to_string());
     }
 
-    let storage = Arc::clone(&state.storage);
+    let _guard_reset = ResetBoolGuard(Arc::clone(&state.hitl_active));
+    let hitl_flag = Arc::clone(&state.hitl_active);
+    let broker_snapshot = state
+        .model_broker
+        .read()
+        .map_err(|_| "model broker lock poisoned".to_string())?
+        .clone();
+    let registry_snapshot = state
+        .tool_registry
+        .read()
+        .map_err(|_| "tool registry lock poisoned".to_string())?
+        .clone();
+    let policy_guard = Arc::clone(&state.policy_guard);
+    let hitl_broker = Arc::clone(&state.hitl_broker);
+    let executor = Arc::new({
+        let sessions = Arc::clone(&state.sessions);
+        move |tool_name: String, args: Value| {
+            let sessions = Arc::clone(&sessions);
+            Box::pin(async move { execute_host_tool(&sessions, &tool_name, args) })
+                as aitools_ai::planner::ToolExecFuture
+        }
+    });
+    let profile_kind = ModelProfileKind::parse_lenient(profile.as_deref().unwrap_or("balanced"));
+    let keys = KeychainApiKeyProvider;
+
+    execute_agent_prompt(
+        AgentPromptRequest {
+            prompt: &prompt,
+            trace_id: &trace_id,
+            chips: &chips,
+            profile: profile_kind,
+        },
+        &state.http_client,
+        &broker_snapshot,
+        &keys,
+        &registry_snapshot,
+        policy_guard,
+        hitl_broker,
+        move |ev| {
+            if matches!(ev, AgentStreamEvent::HitlSuspended { .. }) {
+                hitl_flag.store(true, Ordering::Relaxed);
+            } else if matches!(
+                ev,
+                AgentStreamEvent::NodeCompleted { .. }
+                    | AgentStreamEvent::NodeFailed { .. }
+                    | AgentStreamEvent::Completed { .. }
+            ) {
+                hitl_flag.store(false, Ordering::Relaxed);
+            }
+            let _ = on_event.send(ev);
+        },
+        executor,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn run_agent_dag<R: Runtime>(
+    plan: DagPlan,
+    on_event: Channel<DagEvent>,
+    webview: tauri::Webview<R>,
+    state: tauri::State<'_, AitoolsState>,
+) -> std::result::Result<HashMapStringValue, String> {
+    ensure_host_webview(webview.label())?;
+    let faults = state
+        .faults
+        .lock()
+        .map_err(|_| "fault lock poisoned".to_string())?
+        .clone();
+    if faults.inject_llm_stream_abort {
+        return Err("DSH fault injected: LLM stream aborted".to_string());
+    }
+
+    let _guard_reset = ResetBoolGuard(Arc::clone(&state.hitl_active));
+    let hitl_flag = Arc::clone(&state.hitl_active);
     let guard = Arc::clone(&state.policy_guard);
     let broker = Arc::clone(&state.hitl_broker);
-
+    let sessions = Arc::clone(&state.sessions);
+    let _ = build_tool_executor(Arc::clone(&sessions));
     let executor = Arc::new(move |tool_name: String, args: Value| {
-        let storage = Arc::clone(&storage);
-        Box::pin(async move {
-            match tool_name.as_str() {
-                "os.clipboard.read" => Ok(json!({ "text": "" })),
-                "os.files.find" => Ok(json!({ "matches": [] })),
-                _ => {
-                    let _ = &storage;
-                    Ok(json!({ "executed": tool_name, "args": args }))
-                }
-            }
-        }) as aitools_ai::planner::ToolExecFuture
+        let sessions = Arc::clone(&sessions);
+        Box::pin(async move { execute_host_tool(&sessions, &tool_name, args) })
+            as aitools_ai::planner::ToolExecFuture
     });
 
     execute_dag(
@@ -292,6 +877,9 @@ async fn run_agent_dag(
         guard,
         broker,
         move |ev| {
+            if matches!(ev, DagEvent::HitlSuspended { .. }) {
+                hitl_flag.store(true, Ordering::Relaxed);
+            }
             let _ = on_event.send(ev);
         },
         executor,
@@ -307,12 +895,18 @@ async fn run_agent_dag(
 pub struct HashMapStringValue(std::collections::HashMap<String, Value>);
 
 #[tauri::command]
-fn resolve_hitl_step(
+fn resolve_hitl_step<R: Runtime>(
     node_id: String,
     resolution: HitlResolution,
+    webview: tauri::Webview<R>,
     state: tauri::State<'_, AitoolsState>,
-) -> bool {
-    state.hitl_broker.resolve(&node_id, resolution)
+) -> std::result::Result<bool, String> {
+    ensure_host_webview(webview.label())?;
+    let resolved = state.hitl_broker.resolve(&node_id, resolution);
+    if resolved {
+        state.hitl_active.store(false, Ordering::Relaxed);
+    }
+    Ok(resolved)
 }
 
 #[tauri::command]
@@ -320,7 +914,7 @@ fn resolve_hitl_step(
     clippy::too_many_arguments,
     reason = "Tauri IPC command parameters map directly to flat JSON invoke keys"
 )]
-fn invoke_legacy_list_feature(
+fn invoke_legacy_list_feature<R: Runtime>(
     plugin_id: String,
     trace_id: String,
     preload_code: String,
@@ -328,8 +922,10 @@ fn invoke_legacy_list_feature(
     action_payload: Value,
     search_query: Option<String>,
     channel: Channel<ListPushEvent>,
+    webview: tauri::Webview<R>,
     state: tauri::State<'_, AitoolsState>,
 ) -> std::result::Result<u64, String> {
+    ensure_host_webview(webview.label())?;
     let sink = Arc::new(ChannelListSink { channel });
     let handle = invoke_preload_list_feature(
         &plugin_id,
@@ -346,10 +942,12 @@ fn invoke_legacy_list_feature(
 }
 
 #[tauri::command]
-fn dsh_recent_logs(
+fn dsh_recent_logs<R: Runtime>(
     limit: usize,
+    webview: tauri::Webview<R>,
     state: tauri::State<'_, AitoolsState>,
 ) -> std::result::Result<Vec<LogRecord>, String> {
+    ensure_host_webview(webview.label())?;
     let Some(ref telemetry) = state.telemetry else {
         return Ok(Vec::new());
     };
@@ -357,10 +955,12 @@ fn dsh_recent_logs(
 }
 
 #[tauri::command]
-fn dsh_ingest_frontend_log(
+fn dsh_ingest_frontend_log<R: Runtime>(
     payload: FrontendLogPayload,
+    webview: tauri::Webview<R>,
     state: tauri::State<'_, AitoolsState>,
 ) -> std::result::Result<(), String> {
+    ensure_host_webview(webview.label())?;
     if let Some(ref telemetry) = state.telemetry {
         telemetry.ingest_external(
             &payload.level,
@@ -375,16 +975,32 @@ fn dsh_ingest_frontend_log(
 }
 
 #[tauri::command]
-fn dsh_set_fault_injection(
+fn dsh_set_fault_injection<R: Runtime>(
     config: FaultInjectionConfig,
+    webview: tauri::Webview<R>,
     state: tauri::State<'_, AitoolsState>,
 ) -> std::result::Result<FaultInjectionConfig, String> {
+    ensure_host_webview(webview.label())?;
     let mut guard = state
         .faults
         .lock()
         .map_err(|_| "fault lock poisoned".to_string())?;
     *guard = config.clone();
     Ok(config)
+}
+
+/// Ensures a privileged host command cannot be invoked from any `plugin-*` guest webview (`SPEC-016-R4`).
+///
+/// # Errors
+///
+/// Returns a `"forbidden (403): ..."` string if `label` begins with `"plugin-"`.
+pub fn ensure_host_webview(label: &str) -> std::result::Result<(), String> {
+    if label.starts_with("plugin-") {
+        return Err(format!(
+            "forbidden (403): guest webview '{label}' is not permitted to invoke host commands"
+        ));
+    }
+    Ok(())
 }
 
 fn plugin_id_from_label(label: &str) -> std::result::Result<&str, String> {
@@ -495,48 +1111,52 @@ fn db_all_docs<R: Runtime>(
 }
 
 #[tauri::command]
-fn ai_chat<R: Runtime>(
+async fn ai_chat<R: Runtime>(
     request: SdkChatRequest,
     webview: tauri::Webview<R>,
     state: tauri::State<'_, AitoolsState>,
 ) -> std::result::Result<String, String> {
     let plugin_id = plugin_id_from_label(webview.label())?;
-    let est_tokens =
-        ((request.prompt.len() + request.system.as_deref().unwrap_or("").len()) / 4).max(1) as u64;
-    let broker = state
+    let broker_snapshot = state
         .model_broker
         .read()
-        .map_err(|_| "model broker lock poisoned".to_string())?;
-    broker
-        .check_and_consume_quota(plugin_id, est_tokens, Instant::now())
+        .map_err(|_| "model broker lock poisoned".to_string())?
+        .clone();
+    let profile = ModelProfileKind::parse_lenient(request.profile.as_deref().unwrap_or("fast"));
+    let keys = KeychainApiKeyProvider;
+    let outcome = broker_snapshot
+        .chat_text(
+            &state.http_client,
+            &keys,
+            plugin_id,
+            profile,
+            request.system.as_deref(),
+            &request.prompt,
+            None,
+        )
+        .await
         .map_err(|e| e.to_string())?;
-    let profile = request.profile.as_deref().unwrap_or("fast");
-    Ok(format!(
-        "[{profile}] processed {} chars for plugin '{plugin_id}'",
-        request.prompt.len()
-    ))
+    Ok(outcome.content)
 }
 
 #[tauri::command]
-fn ai_embed<R: Runtime>(
+async fn ai_embed<R: Runtime>(
     texts: Vec<String>,
     webview: tauri::Webview<R>,
     state: tauri::State<'_, AitoolsState>,
 ) -> std::result::Result<Vec<Vec<f32>>, String> {
     let plugin_id = plugin_id_from_label(webview.label())?;
-    let total_chars: usize = texts.iter().map(String::len).sum();
-    let est_tokens = (total_chars / 4).max(1) as u64;
-    let broker = state
+    let broker_snapshot = state
         .model_broker
         .read()
-        .map_err(|_| "model broker lock poisoned".to_string())?;
-    broker
-        .check_and_consume_quota(plugin_id, est_tokens, Instant::now())
+        .map_err(|_| "model broker lock poisoned".to_string())?
+        .clone();
+    let keys = KeychainApiKeyProvider;
+    let outcome = broker_snapshot
+        .embed_texts(&state.http_client, &keys, plugin_id, &texts)
+        .await
         .map_err(|e| e.to_string())?;
-    Ok(texts
-        .into_iter()
-        .map(|t| vec![t.len() as f32, 1.0])
-        .collect())
+    Ok(outcome.vectors)
 }
 
 #[tauri::command]
@@ -572,6 +1192,12 @@ fn to_http_response(reply: ProtocolReply) -> Response<Vec<u8>> {
 /// Constructs the `aitools` Tauri v2 plugin with `aitools-plugin://`, `aitools-sync://`, and IPC commands.
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     PluginBuilder::new("aitools")
+        .setup(|app, _api| {
+            if let Some(state) = app.try_state::<AitoolsState>() {
+                state.attach_app_handle(app.clone());
+            }
+            Ok(())
+        })
         .register_asynchronous_uri_scheme_protocol("aitools-plugin", |ctx, request, responder| {
             let label = ctx.webview_label().to_string();
             let uri = request.uri().to_string();
@@ -584,18 +1210,24 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             let uri = request.uri().to_string();
             let body = request.body().clone();
             let state = ctx.app_handle().state::<AitoolsState>();
-            let reply = handle_sync_request(&label, &uri, &body, &state.storage, &state.faults);
+            let reply = handle_sync_request_with_session(&label, &uri, &body, &state.sessions);
             responder.respond(to_http_response(reply));
         })
         .invoke_handler(tauri::generate_handler![
             search_features,
             zero_query_suggestions,
+            launch_item,
+            search_list_mode,
+            select_list_item,
+            sync_ztools_dir,
+            submit_agent_prompt,
             run_agent_dag,
             resolve_hitl_step,
             invoke_legacy_list_feature,
             dsh_recent_logs,
             dsh_ingest_frontend_log,
             dsh_set_fault_injection,
+            dsh_preload_status,
             db_get,
             db_put,
             db_remove,
@@ -610,6 +1242,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::handle_sync_request;
+    use base64::Engine as _;
     use tempfile::TempDir;
 
     #[test]
@@ -762,5 +1396,374 @@ mod tests {
         assert!(sdk_db_get(&storage, "plugin-smart-clip", "clip-1")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn spec_015_r4_webview_shim_sync_call_and_preload_proxy() {
+        let dir = TempDir::new().unwrap();
+        let plugin_dir = dir.path().join("shim-demo");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            r#"{"name":"Shim Demo","version":"1.0.0","preload":"preload.js","features":[{"code":"run","cmds":["run"]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            plugin_dir.join("preload.js"),
+            r#"window.demoApi = { greet: (name) => "hi:" + name };"#,
+        )
+        .unwrap();
+
+        let state = AitoolsState::open(dir.path().join("db"), None, &[]).unwrap();
+        let sync_res = state.sessions.sync_plugins_directory(dir.path());
+        assert_eq!(sync_res.indexed_plugins, 1);
+
+        let (_rt, info) = state
+            .sessions
+            .get_or_load_preload_session("plugin-ab4e")
+            .or_else(|_| {
+                let plugin_id = state.sessions.preload_status_summary().plugins[0]
+                    .plugin_id
+                    .clone();
+                state.sessions.get_or_load_preload_session(&plugin_id)
+            })
+            .unwrap();
+        let plugin_id = state.sessions.preload_status_summary().plugins[0]
+            .plugin_id
+            .clone();
+
+        let script =
+            build_initialization_script_with_preload_props(&plugin_id, &info.exported_props);
+        assert!(
+            script.contains("'ztools'")
+                && script.contains("'utools'")
+                && script.contains("'rubick'")
+        );
+        assert!(script.contains("__aitools_sync_call__"));
+        assert!(script.contains("demoApi"));
+
+        let label = format!("plugin-{plugin_id}");
+        let uri = format!("aitools-sync://{plugin_id}/preload/invoke");
+        let reply = handle_sync_request_with_session(
+            &label,
+            &uri,
+            br#"{"propPath":"demoApi.greet","args":["world"]}"#,
+            &state.sessions,
+        );
+        assert_eq!(reply.status, 200);
+        let parsed: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(parsed, Value::String("hi:world".to_string()));
+    }
+
+    #[test]
+    fn spec_015_r5_sync_protocol_db_all_ops_attachments_and_promises() {
+        let dir = TempDir::new().unwrap();
+        let state = AitoolsState::open(dir.path(), None, &[]).unwrap();
+
+        // Bulk insert mixed flat ZTools & envelope documents.
+        let bulk = handle_sync_request_with_session(
+            "plugin-p1",
+            "aitools-sync://p1/db/bulkDocs",
+            br#"{"docs":[{"_id":"k1","note":"flat-note"},{"_id":"k2","data":{"nested":42}}]}"#,
+            &state.sessions,
+        );
+        assert_eq!(bulk.status, 200);
+        let bulk_json: Value = serde_json::from_slice(&bulk.body).unwrap();
+        assert_eq!(bulk_json.as_array().unwrap().len(), 2);
+
+        let all_by_keys = handle_sync_request_with_session(
+            "plugin-p1",
+            "aitools-sync://p1/db/allDocs",
+            br#"{"keys":["k2","missing"]}"#,
+            &state.sessions,
+        );
+        assert_eq!(all_by_keys.status, 200);
+        let docs: Value = serde_json::from_slice(&all_by_keys.body).unwrap();
+        assert_eq!(docs.as_array().unwrap().len(), 1);
+        assert_eq!(docs[0]["_id"], "k2");
+
+        // Attachments put/get/type/remove roundtrip.
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"png-bytes-test");
+        let put_att = handle_sync_request_with_session(
+            "plugin-p1",
+            "aitools-sync://p1/db/putAttachment",
+            format!(r#"{{"id":"img-1","data":"{b64}","type":"image/png"}}"#).as_bytes(),
+            &state.sessions,
+        );
+        assert_eq!(put_att.status, 200);
+
+        let get_att = handle_sync_request_with_session(
+            "plugin-p1",
+            "aitools-sync://p1/db/getAttachment",
+            br#"{"id":"img-1"}"#,
+            &state.sessions,
+        );
+        assert_eq!(get_att.status, 200);
+        let att_val: Value = serde_json::from_slice(&get_att.body).unwrap();
+        assert_eq!(att_val["data"], b64);
+        assert_eq!(att_val["contentType"], "image/png");
+
+        let att_type = handle_sync_request_with_session(
+            "plugin-p1",
+            "aitools-sync://p1/db/getAttachmentType",
+            br#"{"id":"img-1"}"#,
+            &state.sessions,
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&att_type.body).unwrap(),
+            Value::String("image/png".to_string())
+        );
+
+        let rm_att = handle_sync_request_with_session(
+            "plugin-p1",
+            "aitools-sync://p1/db/removeAttachment",
+            br#"{"id":"img-1"}"#,
+            &state.sessions,
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&rm_att.body).unwrap()["ok"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn spec_015_r6_ztools_lifecycle_os_clipboard_shell_window_and_ai_apis() {
+        let dir = TempDir::new().unwrap();
+        let state = AitoolsState::open(dir.path(), None, &[]).unwrap();
+        let mem_clip = Arc::new(aitools_native::context::MemoryClipboard::with_text("init"));
+        state.sessions.set_clipboard_provider(mem_clip);
+        let noop_ctl = Arc::new(NoopWindowController::default());
+        state.sessions.set_window_controller(noop_ctl.clone());
+
+        let cp = handle_sync_request_with_session(
+            "plugin-z1",
+            "aitools-sync://z1/clipboard/copyText",
+            br#"{"text":"copied-value"}"#,
+            &state.sessions,
+        );
+        assert_eq!(cp.status, 200);
+        let read = handle_sync_request_with_session(
+            "plugin-z1",
+            "aitools-sync://z1/clipboard/readText",
+            b"{}",
+            &state.sessions,
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&read.body).unwrap(),
+            Value::String("copied-value".to_string())
+        );
+
+        let notif = handle_sync_request_with_session(
+            "plugin-z1",
+            "aitools-sync://z1/notification/show",
+            br#"{"body":"Hello ZTools"}"#,
+            &state.sessions,
+        );
+        assert_eq!(notif.status, 200);
+        assert_eq!(noop_ctl.notifications.lock().unwrap().len(), 1);
+
+        let open_ext = handle_sync_request_with_session(
+            "plugin-z1",
+            "aitools-sync://z1/shell/openExternal",
+            br#"{"url":"https://example.com"}"#,
+            &state.sessions,
+        );
+        assert_eq!(open_ext.status, 200);
+        assert_eq!(
+            noop_ctl.shell_actions.lock().unwrap()[0].1,
+            "https://example.com"
+        );
+
+        let ai_models = handle_sync_request_with_session(
+            "plugin-z1",
+            "aitools-sync://z1/ai/allModels",
+            b"{}",
+            &state.sessions,
+        );
+        assert_eq!(ai_models.status, 200);
+        let models: Value = serde_json::from_slice(&ai_models.body).unwrap();
+        assert!(models.as_array().unwrap().len() >= 3);
+
+        let ai_resp = handle_sync_request_with_session(
+            "plugin-z1",
+            "aitools-sync://z1/ai/chat",
+            br#"{"prompt":"ping","model":"fast"}"#,
+            &state.sessions,
+        );
+        assert_eq!(ai_resp.status, 200);
+        let chat_json: Value = serde_json::from_slice(&ai_resp.body).unwrap();
+        assert_eq!(chat_json["backend"], "offline_mock");
+    }
+
+    #[test]
+    fn spec_016_r2_launch_item_and_list_mode_dispatch_all_five_kinds() {
+        let dir = TempDir::new().unwrap();
+        let workspace_builtin = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("plugins")
+            .join("builtin");
+
+        let ztools_list_dir = dir.path().join("list-demo");
+        std::fs::create_dir_all(&ztools_list_dir).unwrap();
+        std::fs::write(
+            ztools_list_dir.join("plugin.json"),
+            r#"{"name":"List Demo","version":"1.0.0","preload":"preload.js","features":[{"code":"items","cmds":["items"]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            ztools_list_dir.join("preload.js"),
+            r#"window.exports = {
+                items: {
+                    mode: "list",
+                    args: {
+                        enter: (action, callbackSetList) => {
+                            callbackSetList([{ title: "Alpha", description: "first" }, { title: "Beta", description: "second" }]);
+                        },
+                        search: (action, word, callbackSetList) => {
+                            const list = [{ title: "Alpha", description: "first" }, { title: "Beta", description: "second" }];
+                            callbackSetList(list.filter(i => i.title.toLowerCase().includes(word.toLowerCase())));
+                        },
+                        select: (action, item, callbackSetList) => {
+                            window.utools.outPlugin(false);
+                            return "selected:" + item.title;
+                        }
+                    }
+                }
+            };"#,
+        )
+        .unwrap();
+
+        let state = AitoolsState::open(dir.path().join("db"), None, &[]).unwrap();
+        state
+            .sessions
+            .set_execution_mode(aitools_js_bridge::PreloadExecutionMode::PureRustOnly);
+        let noop_ctl = Arc::new(NoopWindowController::default());
+        state.sessions.set_window_controller(noop_ctl.clone());
+
+        let builtin_sync = state.sessions.sync_plugins_directory(&workspace_builtin);
+        assert_eq!(builtin_sync.indexed_plugins, 8);
+        let custom_sync = state.sessions.sync_plugins_directory(dir.path());
+        assert_eq!(custom_sync.indexed_plugins, 1);
+
+        // 1. WebView plugin launch -> OpenedWindow
+        let launched_ui = state
+            .sessions
+            .launch_item(
+                "clipboard-history",
+                "clipboard-history",
+                "",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(matches!(launched_ui, LaunchResult::OpenedWindow { .. }));
+
+        // 2. Wasm plugin launch -> WasmResult (with manifest permission rejection check too!)
+        let launched_wasm = state
+            .sessions
+            .launch_item("format_json", "json-codec", r#"{"ok":1}"#, None, None, None)
+            .unwrap();
+        match launched_wasm {
+            LaunchResult::WasmResult { output, .. } => {
+                assert_eq!(output["result"]["valid"], json!(true));
+            }
+            other => panic!("expected WasmResult, got {other:?}"),
+        }
+
+        // Manifest permission isolation on v2 plugin: `json-codec` has NO `db.write` or `network`.
+        let denied = handle_sync_request_with_session(
+            "plugin-json-codec",
+            "aitools-sync://json-codec/db/put",
+            br#"{"_id":"x","v":1}"#,
+            &state.sessions,
+        );
+        assert_eq!(denied.status, 403);
+
+        // 3. ZTools headless list mode (QuickJsNodeCompat PureRustOnly) -> ListMode -> search -> select
+        let list_plugin_id = state
+            .sessions
+            .preload_status_summary()
+            .plugins
+            .into_iter()
+            .find(|p| p.plugin_id.starts_with("list-demo"))
+            .unwrap()
+            .plugin_id;
+        let launched_list = state
+            .sessions
+            .launch_item("items", &list_plugin_id, "", Some("list"), None, None)
+            .unwrap();
+        let session_id = match launched_list {
+            LaunchResult::ListMode {
+                session_id, items, ..
+            } => {
+                assert_eq!(items.len(), 2);
+                session_id
+            }
+            other => panic!("expected ListMode, got {other:?}"),
+        };
+        let filtered = state
+            .sessions
+            .search_list_mode(&session_id, &list_plugin_id, "items", "beta", None)
+            .unwrap();
+        assert_eq!(filtered.items.len(), 1);
+        assert_eq!(filtered.items[0].title, "Beta");
+        let selected = state
+            .sessions
+            .select_list_item(
+                &session_id,
+                &list_plugin_id,
+                "items",
+                json!({ "title": "Beta" }),
+                0,
+            )
+            .unwrap();
+        assert!(selected.ok);
+        assert_eq!(selected.out_plugin, Some(true));
+
+        // 4. Macro launch -> MacroStarted
+        let mac = state
+            .sessions
+            .launch_item(
+                "macro:daily",
+                "builtin",
+                "",
+                Some("macro"),
+                Some("tr-1"),
+                None,
+            )
+            .unwrap();
+        assert!(matches!(mac, LaunchResult::MacroStarted { .. }));
+
+        // 5. DSH preload summary + PureRustOnly gap enforcement
+        let gap_dir = TempDir::new().unwrap();
+        let gap_plugin = gap_dir.path().join("gap-demo");
+        std::fs::create_dir_all(&gap_plugin).unwrap();
+        std::fs::write(
+            gap_plugin.join("plugin.json"),
+            r#"{"name":"Gap Demo","version":"1.0.0","preload":"preload.js","features":[{"code":"gap","cmds":["gap"]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            gap_plugin.join("preload.js"),
+            r#"const { Worker } = require('worker_threads'); window.gap = Worker;"#,
+        )
+        .unwrap();
+        let gap_sync = state.sessions.sync_plugins_directory(gap_dir.path());
+        assert_eq!(gap_sync.indexed_plugins, 1);
+        let gap_err = state
+            .sessions
+            .get_or_load_preload_session("gap-demo")
+            .unwrap_err();
+        assert!(gap_err.message.contains("gap"));
+
+        let dsh_summary = state.sessions.preload_status_summary();
+        assert_eq!(dsh_summary.execution_mode, "PureRustOnly");
+        assert!(dsh_summary.node_compat_gap_count >= 1);
+        assert!(dsh_summary
+            .plugins
+            .iter()
+            .any(|p| p.plugin_id == list_plugin_id && p.active_tier == "QuickJsNodeCompat"));
     }
 }

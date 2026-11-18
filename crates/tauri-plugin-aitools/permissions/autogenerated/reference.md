@@ -6,12 +6,18 @@ Default permissions for the aitools Tauri plugin
 
 - `allow-search-features`
 - `allow-zero-query-suggestions`
+- `allow-launch-item`
+- `allow-search-list-mode`
+- `allow-select-list-item`
+- `allow-sync-ztools-dir`
+- `allow-submit-agent-prompt`
 - `allow-run-agent-dag`
 - `allow-resolve-hitl-step`
 - `allow-invoke-legacy-list-feature`
 - `allow-dsh-recent-logs`
 - `allow-dsh-ingest-frontend-log`
 - `allow-dsh-set-fault-injection`
+- `allow-dsh-preload-status`
 - `allow-db-get`
 - `allow-db-put`
 - `allow-db-remove`
@@ -214,6 +220,32 @@ Denies the dsh_ingest_frontend_log command without any pre-configured scope.
 <tr>
 <td>
 
+`aitools:allow-dsh-preload-status`
+
+</td>
+<td>
+
+Enables the dsh_preload_status command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`aitools:deny-dsh-preload-status`
+
+</td>
+<td>
+
+Denies the dsh_preload_status command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `aitools:allow-dsh-recent-logs`
 
 </td>
@@ -285,6 +317,32 @@ Enables the invoke_legacy_list_feature command without any pre-configured scope.
 <td>
 
 Denies the invoke_legacy_list_feature command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`aitools:allow-launch-item`
+
+</td>
+<td>
+
+Enables the launch_item command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`aitools:deny-launch-item`
+
+</td>
+<td>
+
+Denies the launch_item command without any pre-configured scope.
 
 </td>
 </tr>
@@ -370,6 +428,110 @@ Denies the search_features command without any pre-configured scope.
 <tr>
 <td>
 
+`aitools:allow-search-list-mode`
+
+</td>
+<td>
+
+Enables the search_list_mode command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`aitools:deny-search-list-mode`
+
+</td>
+<td>
+
+Denies the search_list_mode command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`aitools:allow-select-list-item`
+
+</td>
+<td>
+
+Enables the select_list_item command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`aitools:deny-select-list-item`
+
+</td>
+<td>
+
+Denies the select_list_item command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`aitools:allow-submit-agent-prompt`
+
+</td>
+<td>
+
+Enables the submit_agent_prompt command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`aitools:deny-submit-agent-prompt`
+
+</td>
+<td>
+
+Denies the submit_agent_prompt command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`aitools:allow-sync-ztools-dir`
+
+</td>
+<td>
+
+Enables the sync_ztools_dir command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`aitools:deny-sync-ztools-dir`
+
+</td>
+<td>
+
+Denies the sync_ztools_dir command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `aitools:allow-telemetry-log`
 
 </td>
@@ -415,6 +577,19 @@ Enables the zero_query_suggestions command without any pre-configured scope.
 <td>
 
 Denies the zero_query_suggestions command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`aitools:guest-sandbox`
+
+</td>
+<td>
+
+Least-privilege guest capability granting ONLY plugin-isolated DB, AI, and telemetry commands (SPEC-016-R4).
 
 </td>
 </tr>

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-sync-ztools-dir"
+description = "Enables the sync_ztools_dir command without any pre-configured scope."
+commands.allow = ["sync_ztools_dir"]
+
+[[permission]]
+identifier = "deny-sync-ztools-dir"
+description = "Denies the sync_ztools_dir command without any pre-configured scope."
+commands.deny = ["sync_ztools_dir"]

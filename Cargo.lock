@@ -75,6 +75,7 @@ name = "aitools-core"
 version = "1.0.0"
 dependencies = [
  "aitools-telemetry",
+ "base64 0.22.1",
  "chrono",
  "heed",
  "nucleo-matcher",
@@ -110,6 +111,7 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "tauri-plugin-notification",
  "tauri-plugin-opener",
+ "tempfile",
  "tracing",
 ]
 
@@ -119,11 +121,20 @@ version = "1.0.0"
 dependencies = [
  "aitools-core",
  "aitools-telemetry",
+ "base64 0.22.1",
+ "dirs 5.0.1",
+ "flate2",
+ "hex",
+ "percent-encoding",
  "rquickjs",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
  "thiserror 2.0.21",
  "tracing",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -132,12 +143,21 @@ version = "1.0.0"
 dependencies = [
  "aitools-telemetry",
  "arboard",
+ "base64 0.22.1",
+ "core-foundation",
  "dirs 5.0.1",
+ "image",
  "keyring",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "plist",
+ "raw-window-handle",
  "serde",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
+ "window-vibrancy",
 ]
 
 [[package]]
@@ -2551,6 +2571,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -5096,6 +5118,7 @@ dependencies = [
  "heck 0.5.0",
  "http",
  "http-range",
+ "image",
  "jni",
  "libc",
  "log",
@@ -5220,10 +5243,17 @@ dependencies = [
  "aitools-native",
  "aitools-telemetry",
  "aitools-wasm-host",
+ "base64 0.22.1",
+ "dirs 5.0.1",
+ "percent-encoding",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tauri",
  "tauri-plugin",
+ "tauri-plugin-dialog",
+ "tauri-plugin-notification",
+ "tauri-plugin-opener",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

@@ -1,10 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "plugin-sandbox",
-  "description": "Least-privilege sandbox capability for child plugin webviews (SPEC-006-R2).",
+  "description": "Least-privilege sandbox capability for child plugin webviews (SPEC-016-R4).",
   "webviews": ["plugin-*"],
   "permissions": [
-    "aitools:default",
+    "aitools:guest-sandbox",
+    "core:window:allow-close",
+    "core:event:default",
     "dialog:default",
     "notification:default",
     "opener:default"

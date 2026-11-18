@@ -2,15 +2,18 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use aitools_core::storage::{
     validate_sync_caller, PluginDataQuery, PluginDataRemove, StorageEngine,
 };
 use aitools_core::{AitoolsError, Document};
+use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tracing::info_span;
+
+use crate::session::PluginSessionManager;
 
 /// DSH runtime fault injection switches (`SPEC-013-R3`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,9 +59,9 @@ impl ProtocolReply {
 }
 
 /// Registry of installed plugin filesystem roots for `aitools-plugin://` resolution.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct PluginMountRegistry {
-    roots: RwLock<HashMap<String, PathBuf>>,
+    roots: Arc<RwLock<HashMap<String, PathBuf>>>,
 }
 
 impl PluginMountRegistry {
@@ -121,7 +124,8 @@ pub fn handle_plugin_asset_request(
         return ProtocolReply::text(404, "plugin root not registered");
     };
 
-    let rel_clean = rel_path.trim_start_matches('/');
+    let decoded = percent_decode_str(&rel_path).decode_utf8_lossy();
+    let rel_clean = decoded.trim_start_matches('/');
     let rel_clean = if rel_clean.is_empty() {
         "index.html"
     } else {
@@ -159,6 +163,52 @@ struct SyncPayload {
     keys: Option<Vec<String>>,
     #[serde(default)]
     trace_id: Option<String>,
+}
+
+/// Serves `aitools-sync://<plugin_id>/<op>` via [`PluginSessionManager`] with manifest permission checks
+/// and full ZTools/DB/OS/clipboard/window/AI/preload RPC support (`INV-SEC-01`, `SPEC-015-R5`/`R6`, `SPEC-016-R4`).
+pub fn handle_sync_request_with_session(
+    webview_label: &str,
+    raw_uri: &str,
+    body: &[u8],
+    sessions: &PluginSessionManager,
+) -> ProtocolReply {
+    let Some((plugin_id, op)) = parse_scheme_authority_and_path(raw_uri, "aitools-sync") else {
+        return ProtocolReply::json(400, &json!({ "error": "invalid aitools-sync URI" }));
+    };
+
+    if let Err(err) = validate_sync_caller(webview_label, &plugin_id) {
+        return ProtocolReply::json(403, &json!({ "error": err.to_string() }));
+    }
+
+    let _span = info_span!("aitools_sync", plugin_id = %plugin_id, op = %op).entered();
+    let payload: Value = if body.is_empty() {
+        json!({})
+    } else {
+        match serde_json::from_slice(body) {
+            Ok(v) => v,
+            Err(err) => {
+                return ProtocolReply::json(
+                    400,
+                    &json!({ "error": format!("invalid JSON request body: {err}") }),
+                );
+            }
+        }
+    };
+
+    match sessions.exec_sync_op(&plugin_id, &op, payload, true) {
+        Ok(value) => ProtocolReply::json(200, &value),
+        Err(err) => {
+            let mut body_val = json!({
+                "error": true,
+                "message": err.message,
+            });
+            if let Some(name) = err.name {
+                body_val["name"] = Value::String(name);
+            }
+            ProtocolReply::json(err.status, &body_val)
+        }
+    }
 }
 
 /// Serves `aitools-sync://<plugin_id>/<op>` directly from `heed` LMDB (`INV-SEC-01`, `SPEC-002-R4`).
@@ -317,7 +367,12 @@ fn parse_scheme_authority_and_path(raw_uri: &str, scheme: &str) -> Option<(Strin
 }
 
 fn guess_mime(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()) {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
         Some("html" | "htm") => "text/html; charset=utf-8",
         Some("js" | "mjs" | "cjs") => "application/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
@@ -325,7 +380,14 @@ fn guess_mime(path: &Path) -> &'static str {
         Some("svg") => "image/svg+xml",
         Some("png") => "image/png",
         Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("ico") => "image/x-icon",
+        Some("woff2") => "font/woff2",
+        Some("woff") => "font/woff",
+        Some("ttf") => "font/ttf",
         Some("wasm") => "application/wasm",
+        Some("txt" | "md") => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
     }
 }

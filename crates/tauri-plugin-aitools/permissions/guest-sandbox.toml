@@ -1,0 +1,14 @@
+"$schema" = "schemas/schema.json"
+
+[[set]]
+identifier = "guest-sandbox"
+description = "Least-privilege guest capability granting ONLY plugin-isolated DB, AI, and telemetry commands (SPEC-016-R4)."
+permissions = [
+  "allow-db-get",
+  "allow-db-put",
+  "allow-db-remove",
+  "allow-db-all-docs",
+  "allow-ai-chat",
+  "allow-ai-embed",
+  "allow-telemetry-log",
+]

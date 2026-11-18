@@ -439,15 +439,103 @@ pub fn export_logs(
     Ok(summary)
 }
 
-/// Analyzes persisted telemetry JSONL files (`aitools doctor` / `aitools logs analyze`, `SPEC-014-R2`).
+/// Extended `aitools doctor` report summarizing telemetry percentiles, preload tier usage,
+/// and `node_compat_gap` fallback counts (`SPEC-014-R2`, `SPEC-015-R2b`, `SPEC-016`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorCliReport {
+    /// Core span percentiles and plugin health summary from `aitools-telemetry`.
+    #[serde(flatten)]
+    pub report: aitools_telemetry::DoctorReport,
+    /// Counts of observed preload executions per `PreloadTier` label (`WebViewOnly`, `QuickJsNodeCompat`, `SystemNodeFallback`).
+    pub preload_tier_counts: std::collections::BTreeMap<String, usize>,
+    /// Total `aitools::node_compat_gap` fallback events recorded in logs.
+    pub node_compat_gap_count: usize,
+    /// Per-plugin/capability breakdown of `node_compat_gap` events.
+    pub node_compat_gaps: Vec<NodeCompatGapEntry>,
+}
+
+/// Aggregated `node_compat_gap` fallback counter for one plugin capability (`SPEC-015-R2b`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeCompatGapEntry {
+    /// Plugin identifier triggering the gap, if recorded.
+    pub plugin_id: String,
+    /// Missing Node/V8 capability or module specifier.
+    pub capability: String,
+    /// Number of occurrences in analyzed logs.
+    pub count: usize,
+}
+
+/// Analyzes persisted telemetry JSONL files (`aitools doctor` / `aitools logs analyze`, `SPEC-014-R2`, `SPEC-015-R2b`).
 ///
 /// # Errors
 ///
 /// Returns [`CliError::Telemetry`] if opening `log_dir` or querying log files fails.
-pub fn analyze_logs_dir(log_dir: PathBuf) -> Result<aitools_telemetry::DoctorReport> {
+pub fn analyze_logs_dir(log_dir: PathBuf) -> Result<DoctorCliReport> {
     let handle =
         aitools_telemetry::TelemetryHandle::open_standalone(TelemetryConfig::new(log_dir))?;
-    Ok(handle.analyze_logs(&ExportFilter::default())?)
+    let records = handle.query_records(&ExportFilter::default())?;
+    let report = aitools_telemetry::analyze_records(&records);
+
+    let mut preload_tier_counts = std::collections::BTreeMap::new();
+    let mut gap_map: std::collections::BTreeMap<(String, String), usize> =
+        std::collections::BTreeMap::new();
+    let mut node_compat_gap_count = 0usize;
+
+    for rec in &records {
+        if let Some(tier) = rec
+            .fields
+            .get("preload_tier")
+            .or_else(|| rec.fields.get("active_tier"))
+            .and_then(Value::as_str)
+        {
+            *preload_tier_counts.entry(tier.to_string()).or_insert(0) += 1;
+        } else if rec.span.as_deref() == Some("quickjs_cold_start") {
+            *preload_tier_counts
+                .entry("QuickJsNodeCompat".to_string())
+                .or_insert(0) += 1;
+        }
+
+        let is_gap = rec.source.contains("node_compat_gap")
+            || rec.fields.contains_key("node_compat_gap")
+            || rec.msg.contains("NodeCompatGap");
+        if is_gap {
+            node_compat_gap_count += 1;
+            let plugin_id = rec
+                .plugin_id
+                .clone()
+                .or_else(|| {
+                    rec.fields
+                        .get("plugin_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+            let capability = rec
+                .fields
+                .get("capability")
+                .or_else(|| rec.fields.get("node_compat_gap"))
+                .and_then(Value::as_str)
+                .unwrap_or("unspecified")
+                .to_string();
+            *gap_map.entry((plugin_id, capability)).or_insert(0) += 1;
+        }
+    }
+
+    let node_compat_gaps = gap_map
+        .into_iter()
+        .map(|((plugin_id, capability), count)| NodeCompatGapEntry {
+            plugin_id,
+            capability,
+            count,
+        })
+        .collect();
+
+    Ok(DoctorCliReport {
+        report,
+        preload_tier_counts,
+        node_compat_gap_count,
+        node_compat_gaps,
+    })
 }
 
 /// Converts an `aitools-diag-*.zip` bundle into a `.ztrace` replay fixture (`SPEC-014-R3` / `SPEC-014-R4`).
@@ -881,5 +969,116 @@ mod tests {
                 "plugin {rel} failed SKILL.md validation"
             );
         }
+    }
+
+    #[test]
+    fn spec_017_r5_builtin_plugins_csp_clean_styled_and_auditable() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let builtin_dirs = [
+            "plugins/builtin/clipboard-history",
+            "plugins/builtin/translation",
+            "plugins/builtin/terminal-launchpad",
+            "plugins/builtin/dev-docs-reference",
+            "plugins/builtin/json-codec",
+            "plugins/builtin/timestamp-calc",
+            "plugins/builtin/snipaste-legacy",
+            "plugins/builtin/todo-legacy",
+        ];
+
+        for rel in builtin_dirs {
+            let dir = root.join(rel);
+            let report = audit_plugin(&dir)
+                .unwrap_or_else(|e| panic!("builtin audit failed for {rel}: {e}"));
+            assert!(report.skill_valid, "{rel} failed SKILL.md check");
+
+            let loaded = aitools_core::load_plugin_dir(&dir)
+                .unwrap_or_else(|e| panic!("load_plugin_dir failed for {rel}: {e}"));
+            let entries = loaded.to_feature_entries_for_platform(None);
+            assert!(
+                !entries.is_empty(),
+                "{rel} must expose at least one searchable feature"
+            );
+
+            let html_path = dir.join("index.html");
+            if html_path.is_file() {
+                let html = fs::read_to_string(&html_path).unwrap();
+                let lower = html.to_ascii_lowercase();
+                assert!(
+                    !lower.contains("<style"),
+                    "{rel}/index.html must not contain inline <style>"
+                );
+                assert!(
+                    !lower.contains("onclick=") && !lower.contains("onload="),
+                    "{rel}/index.html must not contain inline event attributes"
+                );
+                // Any <script tag must carry src="..." and no inline body before </script>.
+                for chunk in lower.split("<script").skip(1) {
+                    let (tag_head, rest) = chunk
+                        .split_once('>')
+                        .unwrap_or_else(|| panic!("malformed <script> in {rel}/index.html"));
+                    assert!(
+                        tag_head.contains("src="),
+                        "{rel}/index.html has inline <script> without src="
+                    );
+                    let body = rest.split("</script>").next().unwrap_or("");
+                    assert!(
+                        body.trim().is_empty(),
+                        "{rel}/index.html has non-empty inline <script> body"
+                    );
+                }
+                assert!(
+                    dir.join("style.css").is_file(),
+                    "{rel} must ship external style.css"
+                );
+                assert!(
+                    dir.join("main.js").is_file(),
+                    "{rel} must ship external main.js"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn spec_015_r2b_doctor_reports_preload_tier_and_node_compat_gaps() {
+        let dir = TempDir::new().unwrap();
+        let log_file = dir.path().join("aitools-2026-11-17.jsonl");
+        let lines = [
+            json!({
+                "seq": 1,
+                "ts": "2026-11-17T00:00:00.000001Z",
+                "level": "INFO",
+                "source": "aitools_js_bridge",
+                "plugin_id": "char-transform",
+                "span": "quickjs_cold_start",
+                "duration_us": 1200,
+                "msg": "Loaded preload via QuickJsNodeCompat",
+                "fields": { "preload_tier": "QuickJsNodeCompat" }
+            }),
+            json!({
+                "seq": 2,
+                "ts": "2026-11-17T00:00:00.002000Z",
+                "level": "WARN",
+                "source": "aitools::node_compat_gap",
+                "plugin_id": "native-sql-plugin",
+                "msg": "Falling back to SystemNodeFallback due to NodeCompatGap",
+                "fields": { "preload_tier": "SystemNodeFallback", "capability": "sqlite3.node" }
+            }),
+        ];
+        let body = format!("{}\n{}\n", lines[0], lines[1]);
+        fs::write(&log_file, body).unwrap();
+
+        let doctor = analyze_logs_dir(dir.path().to_path_buf()).unwrap();
+        assert_eq!(
+            doctor.preload_tier_counts.get("QuickJsNodeCompat"),
+            Some(&1)
+        );
+        assert_eq!(
+            doctor.preload_tier_counts.get("SystemNodeFallback"),
+            Some(&1)
+        );
+        assert_eq!(doctor.node_compat_gap_count, 1);
+        assert_eq!(doctor.node_compat_gaps.len(), 1);
+        assert_eq!(doctor.node_compat_gaps[0].plugin_id, "native-sql-plugin");
+        assert_eq!(doctor.node_compat_gaps[0].capability, "sqlite3.node");
     }
 }

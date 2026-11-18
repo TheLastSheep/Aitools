@@ -379,6 +379,18 @@
           "markdownDescription": "Denies the dsh_ingest_frontend_log command without any pre-configured scope."
         },
         {
+          "description": "Enables the dsh_preload_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-dsh-preload-status",
+          "markdownDescription": "Enables the dsh_preload_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the dsh_preload_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-dsh-preload-status",
+          "markdownDescription": "Denies the dsh_preload_status command without any pre-configured scope."
+        },
+        {
           "description": "Enables the dsh_recent_logs command without any pre-configured scope.",
           "type": "string",
           "const": "allow-dsh-recent-logs",
@@ -413,6 +425,18 @@
           "type": "string",
           "const": "deny-invoke-legacy-list-feature",
           "markdownDescription": "Denies the invoke_legacy_list_feature command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the launch_item command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-launch-item",
+          "markdownDescription": "Enables the launch_item command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the launch_item command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-launch-item",
+          "markdownDescription": "Denies the launch_item command without any pre-configured scope."
         },
         {
           "description": "Enables the resolve_hitl_step command without any pre-configured scope.",
@@ -451,6 +475,54 @@
           "markdownDescription": "Denies the search_features command without any pre-configured scope."
         },
         {
+          "description": "Enables the search_list_mode command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-search-list-mode",
+          "markdownDescription": "Enables the search_list_mode command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the search_list_mode command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-search-list-mode",
+          "markdownDescription": "Denies the search_list_mode command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the select_list_item command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-select-list-item",
+          "markdownDescription": "Enables the select_list_item command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the select_list_item command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-select-list-item",
+          "markdownDescription": "Denies the select_list_item command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the submit_agent_prompt command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-submit-agent-prompt",
+          "markdownDescription": "Enables the submit_agent_prompt command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the submit_agent_prompt command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-submit-agent-prompt",
+          "markdownDescription": "Denies the submit_agent_prompt command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the sync_ztools_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-sync-ztools-dir",
+          "markdownDescription": "Enables the sync_ztools_dir command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the sync_ztools_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-sync-ztools-dir",
+          "markdownDescription": "Denies the sync_ztools_dir command without any pre-configured scope."
+        },
+        {
           "description": "Enables the telemetry_log command without any pre-configured scope.",
           "type": "string",
           "const": "allow-telemetry-log",
@@ -475,10 +547,16 @@
           "markdownDescription": "Denies the zero_query_suggestions command without any pre-configured scope."
         },
         {
-          "description": "Default permissions for the aitools Tauri plugin\n#### This default permission set includes:\n\n- `allow-search-features`\n- `allow-zero-query-suggestions`\n- `allow-run-agent-dag`\n- `allow-resolve-hitl-step`\n- `allow-invoke-legacy-list-feature`\n- `allow-dsh-recent-logs`\n- `allow-dsh-ingest-frontend-log`\n- `allow-dsh-set-fault-injection`\n- `allow-db-get`\n- `allow-db-put`\n- `allow-db-remove`\n- `allow-db-all-docs`\n- `allow-ai-chat`\n- `allow-ai-embed`\n- `allow-telemetry-log`",
+          "description": "Default permissions for the aitools Tauri plugin\n#### This default permission set includes:\n\n- `allow-search-features`\n- `allow-zero-query-suggestions`\n- `allow-launch-item`\n- `allow-search-list-mode`\n- `allow-select-list-item`\n- `allow-sync-ztools-dir`\n- `allow-submit-agent-prompt`\n- `allow-run-agent-dag`\n- `allow-resolve-hitl-step`\n- `allow-invoke-legacy-list-feature`\n- `allow-dsh-recent-logs`\n- `allow-dsh-ingest-frontend-log`\n- `allow-dsh-set-fault-injection`\n- `allow-dsh-preload-status`\n- `allow-db-get`\n- `allow-db-put`\n- `allow-db-remove`\n- `allow-db-all-docs`\n- `allow-ai-chat`\n- `allow-ai-embed`\n- `allow-telemetry-log`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Default permissions for the aitools Tauri plugin\n#### This default permission set includes:\n\n- `allow-search-features`\n- `allow-zero-query-suggestions`\n- `allow-run-agent-dag`\n- `allow-resolve-hitl-step`\n- `allow-invoke-legacy-list-feature`\n- `allow-dsh-recent-logs`\n- `allow-dsh-ingest-frontend-log`\n- `allow-dsh-set-fault-injection`\n- `allow-db-get`\n- `allow-db-put`\n- `allow-db-remove`\n- `allow-db-all-docs`\n- `allow-ai-chat`\n- `allow-ai-embed`\n- `allow-telemetry-log`"
+          "markdownDescription": "Default permissions for the aitools Tauri plugin\n#### This default permission set includes:\n\n- `allow-search-features`\n- `allow-zero-query-suggestions`\n- `allow-launch-item`\n- `allow-search-list-mode`\n- `allow-select-list-item`\n- `allow-sync-ztools-dir`\n- `allow-submit-agent-prompt`\n- `allow-run-agent-dag`\n- `allow-resolve-hitl-step`\n- `allow-invoke-legacy-list-feature`\n- `allow-dsh-recent-logs`\n- `allow-dsh-ingest-frontend-log`\n- `allow-dsh-set-fault-injection`\n- `allow-dsh-preload-status`\n- `allow-db-get`\n- `allow-db-put`\n- `allow-db-remove`\n- `allow-db-all-docs`\n- `allow-ai-chat`\n- `allow-ai-embed`\n- `allow-telemetry-log`"
+        },
+        {
+          "description": "Least-privilege guest capability granting ONLY plugin-isolated DB, AI, and telemetry commands (SPEC-016-R4).\n#### This permission set includes:\n\n- `allow-db-get`\n- `allow-db-put`\n- `allow-db-remove`\n- `allow-db-all-docs`\n- `allow-ai-chat`\n- `allow-ai-embed`\n- `allow-telemetry-log`",
+          "type": "string",
+          "const": "guest-sandbox",
+          "markdownDescription": "Least-privilege guest capability granting ONLY plugin-isolated DB, AI, and telemetry commands (SPEC-016-R4).\n#### This permission set includes:\n\n- `allow-db-get`\n- `allow-db-put`\n- `allow-db-remove`\n- `allow-db-all-docs`\n- `allow-ai-chat`\n- `allow-ai-embed`\n- `allow-telemetry-log`"
         }
       ]
     }

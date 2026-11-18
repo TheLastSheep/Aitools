@@ -12,9 +12,16 @@ aitools-js-bridge = { path = "../aitools-js-bridge" }
 aitools-native = { path = "../aitools-native" }
 aitools-telemetry = { path = "../aitools-telemetry" }
 aitools-wasm-host = { path = "../aitools-wasm-host" }
+base64 = "0.22"
+dirs = "5"
+percent-encoding = "2"
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tauri = { workspace = true }
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

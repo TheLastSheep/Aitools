@@ -19,10 +19,13 @@ aitools-telemetry = { path = "../crates/aitools-telemetry" }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tauri = { workspace = true }
+tauri = { workspace = true, features = ["tray-icon", "image-png"] }
 tauri-plugin-aitools = { path = "../crates/tauri-plugin-aitools" }
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
 tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
