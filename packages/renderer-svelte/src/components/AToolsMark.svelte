@@ -20,8 +20,8 @@
 
 <style>
   .atools-mark {
-    --mark-size: 38px;
-    --mark-radius: 12px;
+    --mark-size: 32px;
+    --mark-radius: var(--radius-md);
     width: var(--mark-size);
     height: var(--mark-size);
     flex: 0 0 var(--mark-size);
@@ -30,25 +30,27 @@
     justify-content: center;
     overflow: hidden;
     border-radius: var(--mark-radius);
-    background: linear-gradient(135deg, #645cf0 0%, #8060ed 52%, #a650e2 100%);
-    box-shadow: 0 5px 14px -8px rgba(72, 48, 181, 0.56), inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+    background: linear-gradient(135deg, #5b21b6 0%, #6d28d9 52%, #9333ea 100%);
+    box-shadow:
+      0 4px 12px -6px rgba(76, 29, 149, 0.55),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.18);
   }
 
   .atools-mark.small {
-    --mark-size: 42px;
-    --mark-radius: 13px;
+    --mark-size: 20px;
+    --mark-radius: var(--radius-sm);
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
   }
 
   .atools-mark.large {
     --mark-size: 72px;
-    --mark-radius: 21px;
+    --mark-radius: 16px;
   }
 
   svg {
     display: block;
-    width: 74%;
-    height: 74%;
-    fill: #fff;
+    width: 72%;
+    height: 72%;
+    fill: #ffffff;
   }
 </style>

@@ -5,7 +5,8 @@
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "sh -c 'TSC=$(command -v tsc || echo ../renderer-svelte/node_modules/.bin/tsc); exec \"$TSC\" --noEmit'",
+    "build": "sh -c 'TSC=$(command -v tsc || echo ../renderer-svelte/node_modules/.bin/tsc); exec \"$TSC\" --noEmit'"
   },
   "description": "Official typed async SDK for aitools native-ui plugins (SPEC-012-R1)"
 }
