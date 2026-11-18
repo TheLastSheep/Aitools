@@ -6,6 +6,7 @@
 pub mod app_catalog;
 pub mod context;
 pub mod hotkey;
+pub mod icon_analysis;
 pub mod secrets;
 pub mod vibrancy;
 
