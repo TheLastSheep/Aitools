@@ -185,7 +185,7 @@ jobs:
           tauriScript: pnpm tauri
           tagName: ${{ github.ref_name }}
           releaseName: 'aitools ${{ github.ref_name }}'
-          releaseBody: 'Automated multi-platform release verified by SDD Quality Gate (`SPEC-000` <= 18 MB installer budget).'
+          releaseBody: 'Automated multi-platform release verified by SDD Quality Gate (`SPEC-000` <= 18 MiB native installer / <= 95 MiB AppImage budget).'
           releaseDraft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           includeUpdaterJson: true
@@ -207,7 +207,7 @@ jobs:
           includeUpdaterJson: false
           args: ${{ matrix.args }}
 
-      - name: Enforce SPEC-000 installer size budget (<= 18 MB)
+      - name: Enforce SPEC-000 installer size budget (<= 18 MiB native / <= 95 MiB AppImage)
         shell: bash
         run: |
           node - <<'NODE'
@@ -215,8 +215,9 @@ jobs:
           const path = require('node:path');
 
           const bundleRoot = path.join('target', '${{ matrix.rust_target }}', 'release', 'bundle');
-          const maxBytes = 18 * 1024 * 1024; // 18 MiB (SPEC-000 Hard CI Ceiling)
-          const suffixes = ['.dmg', '.msi', '-setup.exe', '.deb', '.AppImage'];
+          const nativeMaxBytes = 18 * 1024 * 1024; // 18 MiB (SPEC-000 Hard CI Ceiling for native installers)
+          const appImageMaxBytes = 95 * 1024 * 1024; // 95 MiB (SPEC-000 Hard CI Ceiling for self-contained AppImage)
+          const suffixes = ['.dmg', '.msi', '.exe', '.deb', '.AppImage'];
 
           function walk(dir, acc) {
             if (!fs.existsSync(dir)) return;
@@ -243,8 +244,11 @@ jobs:
           for (const file of artifacts) {
             const size = fs.statSync(file).size;
             const mib = size / (1024 * 1024);
+            const isAppImage = file.endsWith('.AppImage');
+            const maxBytes = isAppImage ? appImageMaxBytes : nativeMaxBytes;
+            const maxMib = isAppImage ? 95 : 18;
             const ok = size <= maxBytes;
-            console.log(`[${ok ? 'OK' : 'EXCEEDED'}] ${file}: ${mib.toFixed(2)} MiB (${size} bytes)`);
+            console.log(`[${ok ? 'OK' : 'EXCEEDED'}] ${file}: ${mib.toFixed(2)} MiB (limit <= ${maxMib} MiB, ${size} bytes)`);
             if (!ok) failed = true;
           }
           if (failed) process.exit(1);

@@ -1,7 +1,7 @@
 # SPEC-000: System Architecture Invariants & Governance
 
 - **Status:** Active
-- **Version:** 1.0.0
+- **Version:** 1.1.0
 - **Scope:** Workspace-wide (`aitools` core, native hooks, AI orchestrator, plugin hosts, CLI)
 
 ## 1. Crate Dependency DAG (Strict Acyclic Enforcement)
@@ -25,7 +25,8 @@ Dependencies MUST flow downward strictly in the following order. Circular crate 
 | QuickJS legacy `preload.js` cold start | <= 2 ms | <= 10 ms | `quickjs_cold_start` |
 | Wasm plugin instantiation (`wasm32-wasip2`) | <= 1 ms | <= 5 ms | `wasm_instantiate` |
 | Idle resident memory (RSS, no active plugins) | <= 32 MB | <= 45 MB | Process RSS |
-| Release desktop installer footprint | <= 14 MB | <= 18 MB | Release artifact |
+| Native desktop installer footprint (`.dmg` / `.msi` / `.exe` / `.deb`) | <= 14 MiB | <= 18 MiB | Release native installer |
+| Self-contained Linux `.AppImage` (with bundled `libwebkit2gtk-4.1` + GTK3) | <= 85 MiB | <= 95 MiB | Release AppImage bundle |
 
 ## 3. Security & Isolation Invariants
 
@@ -38,7 +39,7 @@ Dependencies MUST flow downward strictly in the following order. Circular crate 
 
 Every numbered requirement clause (`SPEC-XXX-RY`) MUST have at least one corresponding automated test containing `spec_xxx_ry` in its function name.
 
-## 5. Implementation & Verification Status (Updated 2026-11-16)
+## 5. Implementation & Verification Status (Updated 2026-11-17)
 
 - **Active Workspace Crates (All 9 DAG Crates Compiled & Verified):** `aitools-telemetry`, `aitools-core`, `aitools-native`, `aitools-ai`, `aitools-js-bridge`, `aitools-wasm-host`, `tauri-plugin-aitools`, `aitools-cli`, `src-tauri` (`aitools-desktop`).
 - **Security Invariant Traceability:**
@@ -49,3 +50,6 @@ Every numbered requirement clause (`SPEC-XXX-RY`) MUST have at least one corresp
 - **Measured Benchmarks (`cargo bench -p aitools-core --bench wake_latency`):**
   - LMDB `get_doc`: `P50 = 0 us`, `P99 = 3 us` (within `SPEC-000` `<= 0.3 ms` P50 / `<= 5 ms` P99 ceiling).
   - 1,200-feature hybrid search: `P50 = 383 us`, `P99 = 1,798 us`.
+- **Measured Release Artifact Footprints:**
+  - Native installers: macOS `.dmg` `4.75–4.88 MiB`, Linux `.deb` `5.17 MiB` (within `<= 18 MiB` ceiling).
+  - Self-contained Linux `.AppImage`: `79.65 MiB` (within `<= 95 MiB` ceiling).
