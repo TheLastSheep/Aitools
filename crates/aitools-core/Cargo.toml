@@ -6,6 +6,7 @@ description = "Core models, LMDB storage/sync engine, CJK Pinyin & hybrid search
 
 [dependencies]
 aitools-telemetry = { path = "../aitools-telemetry" }
+base64 = "0.22"
 chrono = { workspace = true }
 heed = { workspace = true }
 nucleo-matcher = { workspace = true }

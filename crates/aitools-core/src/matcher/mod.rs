@@ -30,7 +30,7 @@ mod typed_text_pattern;
 mod typed_text_prepare;
 mod typed_text_regex;
 
-pub use index::FeatureSearchIndex;
+pub use index::{FeatureMeta, FeatureSearchIndex};
 pub use media_content::{
     validate_files, MediaFile, MAX_MEDIA_FILES, MAX_MEDIA_PATH_BYTES, MAX_MEDIA_PATH_TOTAL_BYTES,
     MAX_MEDIA_RULE_NAME_BYTES, MAX_MEDIA_RULE_NAME_WORK,

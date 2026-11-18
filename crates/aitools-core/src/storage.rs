@@ -520,6 +520,23 @@ impl StorageEngine {
         }
     }
 
+    /// Removes a stored binary attachment for `plugin_id`, returning whether an entry existed (`SPEC-015-R5`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AitoolsError::Storage`] for invalid IDs or [`AitoolsError::Lmdb`] on LMDB failures.
+    pub fn remove_attachment(&self, plugin_id: &str, attachment_id: &str) -> Result<bool> {
+        let _span =
+            info_span!("db_sync", plugin_id = %plugin_id, op = "remove_attachment").entered();
+        validate_id(plugin_id)?;
+        validate_id(attachment_id)?;
+        let key = composite_key(plugin_id, attachment_id);
+        let mut wtxn = self.env.write_txn()?;
+        let removed = self.attachments.delete(&mut wtxn, &key)?;
+        wtxn.commit()?;
+        Ok(removed)
+    }
+
     /// Persists an installed plugin metadata record.
     ///
     /// # Errors
@@ -887,5 +904,63 @@ mod tests {
 
         let index = crate::FeatureSearchIndex::build(&[macros[0].to_feature_entry()]);
         assert_eq!(index.search("zjg").len(), 1);
+    }
+
+    #[test]
+    fn spec_016_r5_document_flat_and_envelope_reconcile() {
+        let dir = TempDir::new().unwrap();
+        let db = StorageEngine::open(dir.path()).unwrap();
+
+        // Flat ZTools JSON payload
+        let flat: Document = serde_json::from_value(json!({
+            "_id": "todo-1",
+            "text": "ship phase A",
+            "done": false,
+            "tags": ["rust", "ztools"]
+        }))
+        .unwrap();
+        let put_flat = db.put_doc("demo", flat).unwrap();
+        assert_eq!(put_flat.ok, Some(true));
+
+        let fetched_flat = db.get_doc("demo", "todo-1").unwrap().unwrap();
+        assert_eq!(fetched_flat.get_field("text"), Some(&json!("ship phase A")));
+        assert_eq!(fetched_flat.get_field("done"), Some(&json!(false)));
+        let ser_flat = serde_json::to_value(&fetched_flat).unwrap();
+        assert_eq!(ser_flat["_id"], "todo-1");
+        assert_eq!(ser_flat["text"], "ship phase A");
+        assert_eq!(ser_flat["tags"], json!(["rust", "ztools"]));
+
+        // Envelope @aitools/sdk JSON payload
+        let env_doc: Document = serde_json::from_value(json!({
+            "_id": "clip-1",
+            "data": { "text": "hello envelope", "pinned": true }
+        }))
+        .unwrap();
+        db.put_doc("demo", env_doc).unwrap();
+        let fetched_env = db.get_doc("demo", "clip-1").unwrap().unwrap();
+        assert_eq!(
+            fetched_env.payload(),
+            &json!({ "text": "hello envelope", "pinned": true })
+        );
+        assert_eq!(
+            fetched_env.get_field("text"),
+            Some(&json!("hello envelope"))
+        );
+        let ser_env = serde_json::to_value(&fetched_env).unwrap();
+        assert_eq!(ser_env["data"]["pinned"], true);
+
+        // Attachment put/get/remove parity
+        db.put_attachment(
+            "demo",
+            AttachmentRecord {
+                id: "img-1".into(),
+                content_type: "image/png".into(),
+                data: vec![1, 2, 3, 4],
+            },
+        )
+        .unwrap();
+        assert!(db.remove_attachment("demo", "img-1").unwrap());
+        assert!(!db.remove_attachment("demo", "img-1").unwrap());
+        assert!(db.get_attachment("demo", "img-1").unwrap().is_none());
     }
 }

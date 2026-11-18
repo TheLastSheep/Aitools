@@ -9,9 +9,10 @@ pub mod storage;
 
 pub use error::{AitoolsError, Result};
 pub use matcher::{
-    search_all, search_all_checked, to_pinyin_full, to_pinyin_initials, FeatureSearchIndex,
-    MatchResult, MediaFile, MAX_MEDIA_FILES, MAX_MEDIA_PATH_BYTES, MAX_MEDIA_PATH_TOTAL_BYTES,
-    MAX_MEDIA_RULE_NAME_BYTES, MAX_MEDIA_RULE_NAME_WORK, MAX_TYPED_TEXT_REGEX_WORK,
+    search_all, search_all_checked, to_pinyin_full, to_pinyin_initials, FeatureMeta,
+    FeatureSearchIndex, MatchResult, MediaFile, MAX_MEDIA_FILES, MAX_MEDIA_PATH_BYTES,
+    MAX_MEDIA_PATH_TOTAL_BYTES, MAX_MEDIA_RULE_NAME_BYTES, MAX_MEDIA_RULE_NAME_WORK,
+    MAX_TYPED_TEXT_REGEX_WORK,
 };
 pub use models::*;
 pub use storage::{

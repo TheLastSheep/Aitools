@@ -1,5 +1,10 @@
-use aitools_core::{Cmd, CmdTyped, FeatureEntry, FeatureSearchIndex, MediaFile, PluginManifest};
+use aitools_core::{
+    load_plugin_dir, sanitize_plugin_id, scan_plugins_dir, Cmd, CmdTyped, FeatureEntry,
+    FeatureSearchIndex, MediaFile, PluginManifest, PluginRuntimeTier,
+};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use tempfile::TempDir;
 
 #[derive(Deserialize)]
 struct TypedTextCasesFile {
@@ -117,4 +122,104 @@ fn spec_003_r1_ztools_manifest_quirks_parse_cleanly() {
     assert!(feature.main_push);
     assert!(!feature.main_hide);
     assert_eq!(feature.cmds.len(), 3);
+}
+
+#[test]
+fn spec_015_r1_loads_unmodified_ztools_plugin_dir() {
+    let dir = TempDir::new().unwrap();
+    let plugin_a = dir.path().join("alpha-ztools");
+    std::fs::create_dir_all(&plugin_a).unwrap();
+
+    // UTF-8 BOM + pluginName + string platform + minNum/maxNum + relative PNG icon + http main
+    let mut manifest_bytes = vec![0xEF, 0xBB, 0xBF];
+    manifest_bytes.extend_from_slice(
+        br#"{
+            "name": "AlphaZTools",
+            "pluginName": "\u963f\u5c14\u6cd5\u5de5\u5177",
+            "main": "https://tools.example.com/app",
+            "logo": "logo.png",
+            "preload": "./preload.js",
+            "platform": "darwin",
+            "height": 620,
+            "features": [
+                {
+                    "code": "batch-files",
+                    "explain": "Batch process files",
+                    "cmds": [
+                        "alpha",
+                        { "type": "files", "label": "Rename files", "fileType": "file", "minNum": 1, "maxNum": 20 }
+                    ]
+                }
+            ]
+        }"#,
+    );
+    std::fs::write(plugin_a.join("plugin.json"), &manifest_bytes).unwrap();
+    std::fs::write(
+        plugin_a.join("logo.png"),
+        [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A],
+    )
+    .unwrap();
+    std::fs::write(
+        plugin_a.join("preload.js"),
+        "window.exports = { 'batch-files': { mode: 'none', args: { enter() {} } } };",
+    )
+    .unwrap();
+
+    // Non-ASCII plugin names must not collide onto "unnamed-plugin".
+    let id_zh_1 = sanitize_plugin_id("待办清单");
+    let id_zh_2 = sanitize_plugin_id("翻译助手");
+    assert_ne!(id_zh_1, "unnamed-plugin");
+    assert_ne!(id_zh_1, id_zh_2);
+
+    // Record SHA-256 of every file before scanning.
+    let hash_file =
+        |p: &std::path::Path| format!("{:x}", Sha256::digest(std::fs::read(p).unwrap()));
+    let before = [
+        hash_file(&plugin_a.join("plugin.json")),
+        hash_file(&plugin_a.join("logo.png")),
+        hash_file(&plugin_a.join("preload.js")),
+    ];
+
+    let loaded = load_plugin_dir(&plugin_a).unwrap();
+    assert_eq!(loaded.id, "alphaztools");
+    assert_eq!(loaded.name, "阿尔法工具");
+    assert_eq!(loaded.tier, PluginRuntimeTier::LegacyCompat);
+    assert_eq!(
+        loaded.main.as_deref(),
+        Some("https://tools.example.com/app")
+    );
+    assert_eq!(loaded.window_height, 620);
+    assert!(loaded
+        .icon
+        .as_deref()
+        .is_some_and(|i| i.starts_with("data:image/png;base64,")));
+
+    let entries = loaded.to_feature_entries_for_platform(Some("darwin"));
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].plugin_name, "阿尔法工具");
+    let index = FeatureSearchIndex::build(&entries);
+    assert_eq!(index.search("alpha").len(), 1);
+
+    let scanned = scan_plugins_dir(dir.path()).unwrap();
+    assert_eq!(scanned.len(), 1);
+
+    // INV-ZTOOLS-IMMUTABLE: zero file mutations.
+    let after = [
+        hash_file(&plugin_a.join("plugin.json")),
+        hash_file(&plugin_a.join("logo.png")),
+        hash_file(&plugin_a.join("preload.js")),
+    ];
+    assert_eq!(before, after);
+
+    // If sibling ZTools-plugins repository exists on this host, verify all manifests parse read-only.
+    let ztools_repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../ZTools-plugins/plugins");
+    if ztools_repo.is_dir() {
+        let real_plugins = scan_plugins_dir(&ztools_repo).unwrap();
+        assert!(
+            real_plugins.len() >= 100,
+            "expected >= 100 unmodified ZTools plugins to load cleanly, got {}",
+            real_plugins.len()
+        );
+    }
 }

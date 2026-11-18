@@ -12,6 +12,19 @@ use super::{
     SCORE_EXACT, SCORE_FUZZY, SCORE_OVER, SCORE_PINYIN, SCORE_PREFIX, SCORE_REGEX,
 };
 
+/// Display metadata retained in [`FeatureSearchIndex`] for enriching launcher hits (`SPEC-017-R3`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeatureMeta {
+    /// Human-readable feature label.
+    pub label: String,
+    /// Owning plugin or catalog display name.
+    pub plugin_name: String,
+    /// Optional resolved icon URI (`data:`, `http(s)://`, etc.).
+    pub icon: Option<String>,
+    /// Concise feature explanation or description.
+    pub explain: String,
+}
+
 /// Pre-indexed feature search structure for ultra-low-latency repeated searches (`SPEC-005`).
 #[derive(Debug, Clone)]
 pub struct FeatureSearchIndex {
@@ -24,7 +37,11 @@ pub struct FeatureSearchIndex {
 pub(super) struct IndexedFeature {
     pub(super) code: String,
     pub(super) plugin_id: String,
+    pub(super) plugin_name: String,
+    pub(super) label: String,
     pub(super) label_lower: String,
+    pub(super) icon: Option<String>,
+    pub(super) explain: String,
     pub(super) priority: i32,
     pub(super) cmds: Vec<IndexedCmd>,
 }
@@ -78,6 +95,32 @@ impl FeatureSearchIndex {
     pub fn try_build(features: &[FeatureEntry]) -> crate::Result<Self> {
         let text_regex = typed_text_regex::TypedTextRegexBank::build(features)?;
         Self::build_with_text_regex(features, text_regex)
+    }
+
+    /// Returns the number of indexed feature entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns `true` if no features are indexed.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Looks up display metadata for `(plugin_id, feature_code)`.
+    #[must_use]
+    pub fn feature_meta(&self, plugin_id: &str, feature_code: &str) -> Option<FeatureMeta> {
+        self.entries
+            .iter()
+            .find(|e| e.plugin_id == plugin_id && e.code == feature_code)
+            .map(|e| FeatureMeta {
+                label: e.label.clone(),
+                plugin_name: e.plugin_name.clone(),
+                icon: e.icon.clone(),
+                explain: e.explain.clone(),
+            })
     }
 
     fn build_with_text_regex(
@@ -150,7 +193,11 @@ impl FeatureSearchIndex {
                 IndexedFeature {
                     code: feature.code.clone(),
                     plugin_id: feature.plugin_id.clone(),
+                    plugin_name: feature.plugin_name.clone(),
+                    label: feature.label.clone(),
                     label_lower: feature.label.to_lowercase(),
+                    icon: feature.icon.clone(),
+                    explain: feature.explain.clone(),
                     priority: feature.priority,
                     cmds,
                 }
