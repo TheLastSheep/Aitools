@@ -45,6 +45,10 @@ pub struct ManifestV2 {
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub logo: Option<String>,
+    #[serde(default)]
     pub main: Option<String>,
     #[serde(default)]
     pub wasm_entry: Option<String>,
@@ -836,6 +840,52 @@ pub fn decode_manifest_bytes(bytes: &[u8]) -> Result<String> {
         .map_err(|e| AitoolsError::Manifest(format!("invalid UTF-8 manifest: {e}")))
 }
 
+/// Resolves a manifest `logo` or feature `icon` read-only to a verified local file path under `plugin_dir`.
+///
+/// External `http(s)://` and `data:` URIs return `None`; relative paths are canonicalized and checked
+/// to remain within `plugin_dir` (`SPEC-015-R1`, `INV-SEC-01`).
+#[must_use]
+pub fn resolve_plugin_icon_path(plugin_dir: &Path, raw: Option<&str>) -> Option<PathBuf> {
+    let trimmed = raw?.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with("data:")
+        || trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+    {
+        return None;
+    }
+    let without_query = trimmed.split(['?', '#']).next().unwrap_or(trimmed).trim();
+    let rel = without_query
+        .trim_start_matches("./")
+        .trim_start_matches('/');
+    if rel.is_empty() {
+        return None;
+    }
+    let root_canon = std::fs::canonicalize(plugin_dir).ok()?;
+    let target_canon = std::fs::canonicalize(root_canon.join(rel)).ok()?;
+    if !target_canon.starts_with(&root_canon) || !target_canon.is_file() {
+        return None;
+    }
+    let ext = target_canon
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    if matches!(
+        ext.as_deref(),
+        Some("png" | "jpg" | "jpeg" | "svg" | "webp" | "gif" | "ico" | "icns")
+    ) {
+        Some(target_canon)
+    } else {
+        None
+    }
+}
+
+fn find_default_plugin_icon_rel(plugin_dir: &Path) -> Option<&'static str> {
+    ["logo.svg", "logo.png", "icon.svg", "icon.png"]
+        .into_iter()
+        .find(|candidate| resolve_plugin_icon_path(plugin_dir, Some(candidate)).is_some())
+}
+
 /// Resolves a manifest `logo` or feature `icon` read-only into a renderable URI (`data:` or `http(s)://`).
 ///
 /// Relative asset paths are verified to stay within `plugin_dir` and converted to `data:<mime>;base64,...`
@@ -853,12 +903,7 @@ pub fn resolve_plugin_icon(plugin_dir: &Path, raw: Option<&str>) -> Option<Strin
         return Some(trimmed.to_string());
     }
 
-    let rel = trimmed.trim_start_matches("./").trim_start_matches('/');
-    let root_canon = std::fs::canonicalize(plugin_dir).ok()?;
-    let target_canon = std::fs::canonicalize(root_canon.join(rel)).ok()?;
-    if !target_canon.starts_with(&root_canon) || !target_canon.is_file() {
-        return None;
-    }
+    let target_canon = resolve_plugin_icon_path(plugin_dir, Some(trimmed))?;
     let meta = std::fs::metadata(&target_canon).ok()?;
     if meta.len() == 0 || meta.len() as usize > MAX_PLUGIN_ICON_BYTES {
         return None;
@@ -898,13 +943,18 @@ pub fn load_plugin_dir(plugin_dir: &Path) -> Result<LoadedPlugin> {
         let manifest_json: serde_json::Value = serde_json::from_str(&raw)?;
         let manifest: ManifestV2 = serde_json::from_str(&raw)?;
         manifest.validate()?;
-        let icon = resolve_plugin_icon(
-            &root_dir,
-            manifest_json
-                .get("icon")
-                .or_else(|| manifest_json.get("logo"))
-                .and_then(serde_json::Value::as_str),
-        );
+        let raw_v2_icon = manifest
+            .icon
+            .as_deref()
+            .or(manifest.logo.as_deref())
+            .or_else(|| {
+                manifest_json
+                    .get("icon")
+                    .or_else(|| manifest_json.get("logo"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .or_else(|| find_default_plugin_icon_rel(&root_dir));
+        let icon = resolve_plugin_icon(&root_dir, raw_v2_icon);
         return Ok(LoadedPlugin {
             id: manifest.id.clone(),
             name: manifest.name.clone(),
@@ -951,7 +1001,11 @@ pub fn load_plugin_dir(plugin_dir: &Path) -> Result<LoadedPlugin> {
         };
         let main = manifest.effective_main().map(str::to_string);
         let preload = manifest.effective_preload().map(str::to_string);
-        let icon = resolve_plugin_icon(&root_dir, manifest.logo.as_deref());
+        let raw_v1_icon = manifest
+            .logo
+            .as_deref()
+            .or_else(|| find_default_plugin_icon_rel(&root_dir));
+        let icon = resolve_plugin_icon(&root_dir, raw_v1_icon);
         let window_width = manifest_json
             .get("width")
             .and_then(serde_json::Value::as_u64)
@@ -1039,27 +1093,109 @@ impl LoadedPlugin {
     /// Converts this loaded plugin into searchable [`FeatureEntry`] items, optionally filtering by `platform`.
     #[must_use]
     pub fn to_feature_entries_for_platform(&self, platform: Option<&str>) -> Vec<FeatureEntry> {
+        self.to_feature_entries_with_icon_mapper(platform, |_| None)
+    }
+
+    /// Resolves the raw plugin-level icon/logo declaration (falling back to standard `logo.*`/`icon.*` files).
+    #[must_use]
+    pub fn declared_icon_raw(&self) -> Option<&str> {
+        if let Some(ref v1) = self.v1 {
+            if let Some(logo) = v1.logo.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                return Some(logo);
+            }
+        }
+        if let Some(ref v2) = self.v2 {
+            if let Some(icon) = v2.icon.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                return Some(icon);
+            }
+            if let Some(logo) = v2.logo.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                return Some(logo);
+            }
+        }
+        if let Some(raw) = self
+            .manifest_json
+            .get("icon")
+            .or_else(|| self.manifest_json.get("logo"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(raw);
+        }
+        find_default_plugin_icon_rel(&self.root_dir)
+    }
+
+    /// Converts this loaded plugin into [`FeatureEntry`] items while mapping local raster icon paths
+    /// through `map_local_icon` (e.g. into `aitools-plugin://__app_icon__/<id>.png`).
+    #[must_use]
+    pub fn to_feature_entries_with_icon_mapper<F>(
+        &self,
+        platform: Option<&str>,
+        mut map_local_icon: F,
+    ) -> Vec<FeatureEntry>
+    where
+        F: FnMut(&Path) -> Option<String>,
+    {
+        let plugin_icon = self
+            .resolve_icon_with_mapper(self.declared_icon_raw(), &mut map_local_icon)
+            .or_else(|| self.icon.clone());
+
         if let Some(ref v1) = self.v1 {
             if let Some(cur) = platform {
                 if !platform_matches(&v1.platform, cur) {
                     return Vec::new();
                 }
             }
-            return self.convert_features(&v1.features, platform, &[]);
+            return self.convert_features(
+                &v1.features,
+                platform,
+                &[],
+                plugin_icon.as_deref(),
+                &mut map_local_icon,
+            );
         }
         if let Some(ref v2) = self.v2 {
             let tool_names: Vec<String> = v2.ai_tools.iter().map(|t| t.name.clone()).collect();
-            return self.convert_features(&v2.features, platform, &tool_names);
+            return self.convert_features(
+                &v2.features,
+                platform,
+                &tool_names,
+                plugin_icon.as_deref(),
+                &mut map_local_icon,
+            );
         }
         Vec::new()
     }
 
-    fn convert_features(
+    /// Resolves an optional feature or plugin icon string using `map_local_icon` for local files first,
+    /// falling back to [`resolve_plugin_icon`].
+    pub fn resolve_icon_with_mapper<F>(
+        &self,
+        raw: Option<&str>,
+        map_local_icon: &mut F,
+    ) -> Option<String>
+    where
+        F: FnMut(&Path) -> Option<String>,
+    {
+        if let Some(local_path) = resolve_plugin_icon_path(&self.root_dir, raw) {
+            if let Some(mapped) = map_local_icon(&local_path) {
+                return Some(mapped);
+            }
+        }
+        resolve_plugin_icon(&self.root_dir, raw)
+    }
+
+    fn convert_features<F>(
         &self,
         features: &[Feature],
         platform: Option<&str>,
         extra_keywords: &[String],
-    ) -> Vec<FeatureEntry> {
+        plugin_icon: Option<&str>,
+        map_local_icon: &mut F,
+    ) -> Vec<FeatureEntry>
+    where
+        F: FnMut(&Path) -> Option<String>,
+    {
         let mut out = Vec::new();
         for feature in features {
             if let Some(cur) = platform {
@@ -1091,8 +1227,9 @@ impl LoadedPlugin {
                 })
                 .unwrap_or_else(|| self.name.clone());
 
-            let icon = resolve_plugin_icon(&self.root_dir, feature.icon.as_deref())
-                .or_else(|| self.icon.clone());
+            let icon = self
+                .resolve_icon_with_mapper(feature.icon.as_deref(), map_local_icon)
+                .or_else(|| plugin_icon.map(str::to_string));
             let explain = if feature.explain.trim().is_empty() {
                 self.description.clone().unwrap_or_else(|| label.clone())
             } else {
@@ -1146,7 +1283,7 @@ impl LoadedPlugin {
                 plugin_id: self.id.clone(),
                 plugin_name: self.name.clone(),
                 label: self.name.clone(),
-                icon: self.icon.clone(),
+                icon: plugin_icon.map(str::to_string),
                 explain: self
                     .description
                     .clone()

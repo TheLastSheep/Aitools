@@ -444,4 +444,18 @@ mod tests {
         assert_eq!(fixed_hits[0].match_type, "regex");
         assert!(index.search("not-hex").is_empty());
     }
+
+    #[test]
+    fn spec_017_r3_feature_entry_carries_optional_icon_into_feature_meta() {
+        let mut with_icon = feature("icon-feat", vec![Cmd::Text("icon".into())], 10);
+        with_icon.icon = Some("aitools-plugin://__app_icon__/0123456789abcdef.png".into());
+        let index = FeatureSearchIndex::build(&[with_icon]);
+        let meta = index
+            .feature_meta("test-plugin", "icon-feat")
+            .expect("feature meta must exist");
+        assert_eq!(
+            meta.icon.as_deref(),
+            Some("aitools-plugin://__app_icon__/0123456789abcdef.png")
+        );
+    }
 }
