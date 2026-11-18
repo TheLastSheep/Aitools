@@ -200,12 +200,73 @@ fn handle_wake_hotkey<R: Runtime>(app: &AppHandle<R>) {
     let _ = app.emit("aitools://wake", payload);
 }
 
-fn handle_dsh_hotkey<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.show();
-        let _ = win.set_focus();
+/// Static window configuration used when lazily constructing the standalone DSH window (`SPEC-016-R3`, `SPEC-017-R1`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DshWindowSpec {
+    /// Window label (`"dsh"`).
+    pub label: &'static str,
+    /// Frontend hash route (`"/#dsh"`).
+    pub route: &'static str,
+    /// Window title.
+    pub title: &'static str,
+    /// Logical width in DIP.
+    pub width: f64,
+    /// Logical height in DIP.
+    pub height: f64,
+}
+
+/// Returns the lazy DSH window creation specification (`960x640` at `/#dsh`).
+#[must_use]
+pub const fn dsh_window_spec() -> DshWindowSpec {
+    DshWindowSpec {
+        label: "dsh",
+        route: "/#dsh",
+        title: "aitools Developer & Diagnostic Harness",
+        width: 960.0,
+        height: 640.0,
     }
-    let _ = app.emit("aitools://toggle-dsh", ());
+}
+
+/// Shows and focuses `"dsh"` if already constructed, or lazily creates it on demand (`SPEC-016-R3`, `SPEC-017-R1`).
+pub fn open_or_focus_dsh_window<R: Runtime>(app: &AppHandle<R>) {
+    let spec = dsh_window_spec();
+    if let Some(win) = app.get_webview_window(spec.label) {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+        return;
+    }
+    match tauri::WebviewWindowBuilder::new(
+        app,
+        spec.label,
+        tauri::WebviewUrl::App(spec.route.into()),
+    )
+    .title(spec.title)
+    .inner_size(spec.width, spec.height)
+    .center()
+    .build()
+    {
+        Ok(win) => {
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to lazily construct dsh window");
+        }
+    }
+}
+
+fn handle_dsh_hotkey<R: Runtime>(app: &AppHandle<R>) {
+    open_or_focus_dsh_window(app);
+}
+
+fn shutdown_and_flush<R: Runtime>(app_handle: &AppHandle<R>) {
+    if let Some(st) = app_handle.try_state::<AitoolsState>() {
+        st.sessions.shutdown_all();
+        if let Some(ref telemetry) = st.telemetry {
+            let _ = telemetry.flush();
+        }
+    }
 }
 
 /// Configures and launches the Tauri v2 desktop application.
@@ -255,7 +316,9 @@ pub fn run() -> anyhow::Result<()> {
 
             // SPEC-000: initialize aitools-telemetry first.
             let telemetry: Option<std::sync::Arc<TelemetryHandle>> =
-                aitools_telemetry::init(TelemetryConfig::new(log_dir)).ok();
+                aitools_telemetry::init(TelemetryConfig::new(log_dir))
+                    .ok()
+                    .or_else(|| aitools_telemetry::global().ok());
 
             let state = AitoolsState::open(&db_dir, telemetry, &[]).with_context(|| {
                 format!("failed to initialize AitoolsState at {}", db_dir.display())
@@ -269,8 +332,17 @@ pub fn run() -> anyhow::Result<()> {
                 .home_dir()
                 .ok()
                 .map(|home| home.join(".aitools").join("plugins").join("ztools"));
-            let _summary =
+            let summary =
                 index_startup_sources(&state, builtin_dir.as_deref(), ztools_dir.as_deref());
+            tracing::info!(
+                apps_indexed = summary.apps_indexed,
+                plugins_indexed = summary.plugins_indexed,
+                plugin_features_indexed = summary.plugin_features_indexed,
+                "aitools desktop startup indexing complete"
+            );
+            if let Some(ref telemetry) = state.telemetry {
+                let _ = telemetry.flush();
+            }
             app.manage(state);
 
             if let Some(main_win) = app.get_webview_window("main") {
@@ -302,11 +374,9 @@ pub fn run() -> anyhow::Result<()> {
                 .tooltip("aitools")
                 .on_menu_event(|app_handle, event| match event.id().as_ref() {
                     "tray-show" => handle_wake_hotkey(app_handle),
-                    "tray-dsh" => handle_dsh_hotkey(app_handle),
+                    "tray-dsh" => open_or_focus_dsh_window(app_handle),
                     "tray-quit" => {
-                        if let Some(st) = app_handle.try_state::<AitoolsState>() {
-                            st.sessions.shutdown_all();
-                        }
+                        shutdown_and_flush(app_handle);
                         app_handle.exit(0);
                     }
                     _ => {}
@@ -329,9 +399,7 @@ pub fn run() -> anyhow::Result<()> {
 
     app.run(|app_handle, event| {
         if let RunEvent::Exit = event {
-            if let Some(st) = app_handle.try_state::<AitoolsState>() {
-                st.sessions.shutdown_all();
-            }
+            shutdown_and_flush(app_handle);
         }
     });
 
@@ -479,15 +547,30 @@ mod tests {
 
         assert_eq!(conf["app"]["macOSPrivateApi"], serde_json::json!(true));
         let windows = conf["app"]["windows"].as_array().unwrap();
+        assert_eq!(
+            windows.len(),
+            1,
+            "startup must instantiate only the single main WebView; dsh is constructed lazily"
+        );
         let main_win = windows.iter().find(|w| w["label"] == "main").unwrap();
         assert_eq!(main_win["width"], serde_json::json!(780));
         assert_eq!(main_win["height"], serde_json::json!(62));
         assert_eq!(main_win["transparent"], serde_json::json!(true));
         assert_eq!(main_win["decorations"], serde_json::json!(false));
+        assert!(
+            windows.iter().all(|w| w["label"] != "dsh"),
+            "dsh window must not be eagerly created in tauri.conf.json"
+        );
 
-        let dsh_win = windows.iter().find(|w| w["label"] == "dsh").unwrap();
-        assert_eq!(dsh_win["url"], serde_json::json!("/#dsh"));
+        let dsh_spec = super::dsh_window_spec();
+        assert_eq!(dsh_spec.label, "dsh");
+        assert_eq!(dsh_spec.route, "/#dsh");
+        assert_eq!(dsh_spec.title, "aitools Developer & Diagnostic Harness");
+        assert_eq!(dsh_spec.width, 960.0);
+        assert_eq!(dsh_spec.height, 640.0);
+        let _: fn(&tauri::AppHandle<tauri::Wry>) = super::open_or_focus_dsh_window;
 
+        assert_eq!(main_cap["windows"], serde_json::json!(["main", "dsh"]));
         let perms = main_cap["permissions"].as_array().unwrap();
         assert!(perms.contains(&serde_json::json!("core:window:allow-set-size")));
         assert!(perms.contains(&serde_json::json!("core:window:allow-start-dragging")));

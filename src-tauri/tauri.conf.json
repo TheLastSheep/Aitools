@@ -24,15 +24,6 @@
         "alwaysOnTop": true,
         "center": true,
         "visible": false
-      },
-      {
-        "label": "dsh",
-        "title": "aitools Developer & Diagnostic Harness",
-        "url": "/#dsh",
-        "width": 960,
-        "height": 640,
-        "visible": false,
-        "center": true
       }
     ],
     "security": {
