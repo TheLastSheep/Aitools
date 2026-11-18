@@ -7,6 +7,7 @@ pub mod app_catalog;
 pub mod context;
 pub mod hotkey;
 pub mod secrets;
+pub mod vibrancy;
 
 use thiserror::Error;
 
@@ -24,6 +25,9 @@ pub enum NativeError {
 
     #[error("secret store error: {0}")]
     Secret(String),
+
+    #[error("window error: {0}")]
+    Window(String),
 }
 
 /// Convenience result alias for [`NativeError`].

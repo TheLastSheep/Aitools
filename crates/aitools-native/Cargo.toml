@@ -7,11 +7,22 @@ description = "Native OS hooks, double-tap hotkey detector, bounded app catalog,
 [dependencies]
 aitools-telemetry = { path = "../aitools-telemetry" }
 arboard = { workspace = true }
+base64 = "0.22"
 dirs = "5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
 keyring = { workspace = true }
+plist = "1"
+raw-window-handle = "0.6"
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+window-vibrancy = "0.8"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace", "NSRunningApplication", "NSPasteboard", "NSPasteboardItem"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSURL"] }
 
 [dev-dependencies]
 tempfile = "3"

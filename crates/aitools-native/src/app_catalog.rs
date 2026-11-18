@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -14,11 +15,18 @@ pub const MAX_ENTRIES: usize = 4096;
 pub const MAX_APPS: usize = 1024;
 pub const CACHE_TTL: Duration = Duration::from_secs(30);
 
+/// Discovered desktop application entry (`SPEC-001-R4`, `SPEC-016-R1`).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct LauncherApp {
+    /// Primary display name (`.app` stem or localized bundle name).
     pub name: String,
+    /// Full filesystem path to the `.app` bundle or launcher entry.
     pub path: String,
+    /// Search aliases (e.g. `CFBundleDisplayName`, `CFBundleName`, `CFBundleExecutable`, bundle ID).
     pub aliases: Vec<String>,
+    /// Optional platform bundle identifier (`CFBundleIdentifier` on macOS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
 }
 
 /// Bounded cached scanner for installed desktop applications.
@@ -189,16 +197,7 @@ fn scan_directory(
         if file_type.is_dir() {
             if path.extension().and_then(|e| e.to_str()) == Some("app") {
                 if seen.insert(path.clone()) {
-                    let name = path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("App")
-                        .to_string();
-                    apps.push(LauncherApp {
-                        name,
-                        path: path.to_string_lossy().into_owned(),
-                        aliases: Vec::new(),
-                    });
+                    apps.push(build_macos_app_entry(&path));
                 }
             } else if depth < max_depth {
                 scan_directory(
@@ -223,11 +222,113 @@ fn scan_directory(
                     name,
                     path: path.to_string_lossy().into_owned(),
                     aliases: Vec::new(),
+                    bundle_id: None,
                 });
             }
         }
     }
     true
+}
+
+fn build_macos_app_entry(path: &Path) -> LauncherApp {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("App")
+        .to_string();
+    let mut aliases = Vec::new();
+    let mut bundle_id = None;
+    let info_plist = path.join("Contents").join("Info.plist");
+    if info_plist.is_file() {
+        if let Ok(plist::Value::Dictionary(dict)) = plist::Value::from_file(&info_plist) {
+            if let Some(id) = dict.get("CFBundleIdentifier").and_then(|v| v.as_string()) {
+                let trimmed = id.trim();
+                if !trimmed.is_empty() {
+                    bundle_id = Some(trimmed.to_string());
+                    aliases.push(trimmed.to_string());
+                }
+            }
+            for key in ["CFBundleDisplayName", "CFBundleName", "CFBundleExecutable"] {
+                if let Some(val) = dict.get(key).and_then(|v| v.as_string()) {
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty()
+                        && !trimmed.eq_ignore_ascii_case(&stem)
+                        && !aliases.iter().any(|a| a.eq_ignore_ascii_case(trimmed))
+                    {
+                        aliases.push(trimmed.to_string());
+                    }
+                }
+            }
+        }
+    }
+    LauncherApp {
+        name: stem,
+        path: path.to_string_lossy().into_owned(),
+        aliases,
+        bundle_id,
+    }
+}
+
+/// Launches a desktop application by filesystem path or platform application name (`SPEC-016-R2`).
+///
+/// # Errors
+///
+/// Returns [`NativeError::Catalog`] if `target` is empty, contains NUL bytes, or the OS
+/// launcher command fails to spawn.
+pub fn launch_application(target: &str) -> Result<()> {
+    let trimmed = target.trim();
+    if trimmed.is_empty() || trimmed.contains('\0') {
+        return Err(NativeError::Catalog(
+            "application target path or name must not be empty".into(),
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = Command::new("open");
+        if Path::new(trimmed).exists() {
+            cmd.arg(trimmed);
+        } else {
+            cmd.args(["-a", trimmed]);
+        }
+        cmd.spawn()
+            .map_err(|e| NativeError::Catalog(format!("failed to launch '{trimmed}': {e}")))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let program = if trimmed.ends_with(".desktop") {
+            "gio"
+        } else {
+            "xdg-open"
+        };
+        let mut cmd = Command::new(program);
+        if program == "gio" {
+            cmd.args(["launch", trimmed]);
+        } else {
+            cmd.arg(trimmed);
+        }
+        cmd.spawn()
+            .map_err(|e| NativeError::Catalog(format!("failed to launch '{trimmed}': {e}")))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "", trimmed])
+            .spawn()
+            .map_err(|e| NativeError::Catalog(format!("failed to launch '{trimmed}': {e}")))?;
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Err(NativeError::Catalog(
+            "unsupported platform for launching applications".into(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -250,5 +351,29 @@ mod tests {
 
         let capped = scan_roots(&[dir.path().to_path_buf()], MAX_DEPTH, MAX_ENTRIES, 2).unwrap();
         assert_eq!(capped.len(), 2);
+    }
+
+    #[test]
+    fn spec_016_r1_reads_macos_info_plist_aliases_and_bundle_id() {
+        let dir = TempDir::new().unwrap();
+        let contents = dir.path().join("Code.app/Contents");
+        fs::create_dir_all(&contents).unwrap();
+        fs::write(
+            contents.join("Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.microsoft.VSCode</string>
+  <key>CFBundleDisplayName</key><string>Visual Studio Code</string>
+</dict></plist>"#,
+        )
+        .unwrap();
+
+        let mut catalog = AppCatalog::with_roots(vec![dir.path().to_path_buf()]);
+        let apps = catalog.snapshot(Instant::now()).unwrap();
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].name, "Code");
+        assert_eq!(apps[0].bundle_id.as_deref(), Some("com.microsoft.VSCode"));
+        assert!(apps[0].aliases.iter().any(|a| a == "Visual Studio Code"));
     }
 }
